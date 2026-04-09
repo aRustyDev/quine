@@ -1,0 +1,9 @@
+[book]
+title = "Quine-to-Roc Port: Codebase Analysis"
+authors = ["Adam"]
+language = "en"
+multilingual = false
+src = "src"
+
+[build]
+build-dir = "book"
