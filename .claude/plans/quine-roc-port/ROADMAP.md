@@ -14,7 +14,7 @@
 ## Phase 1-7: Roc Implementation (per-layer cycle)
 For each layer: read analysis → design Roc equivalent → build with tests → retrospective
 
-- [ ] Phase 1: Graph Node Model — foundational types (QuineId, QuineValue, HalfEdge, NodeChangeEvent, EventTime, NodeSnapshot, QuineIdProvider)
+- [x] Phase 1: Graph Node Model — foundational types (QuineId, QuineValue, HalfEdge, NodeChangeEvent, EventTime, NodeSnapshot, QuineIdProvider)
 - [ ] Phase 2: Persistence Interfaces — PersistenceAgent interface, PersistenceConfig, BinaryFormat, InMemoryPersistor; defer RocksDB FFI and Cassandra
 - [ ] Phase 3: Graph Structure & Concurrency — shard routing, node lifecycle (sleep/wake), in-memory limits (LRU), message routing (relayTell/relayAsk), namespace support; **resolve actor-replacement design here**
 - [ ] Phase 4: Standing Queries (with minimal Cypher expression evaluator) — MVSQ AST, per-node state machines, WatchableEventIndex, cross-edge subscriptions, result diffing, backpressure; DGB/v1 system deferred
