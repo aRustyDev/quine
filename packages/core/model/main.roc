@@ -5,6 +5,7 @@ package [
     PropertyValue,
     NodeEvent,
     NodeSnapshot,
+    NodeState,
 ] {
     id: "../id/main.roc",
 }
