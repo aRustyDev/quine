@@ -1,0 +1,5 @@
+package [
+    QuineId,
+    EventTime,
+    QuineIdProvider,
+] {}
