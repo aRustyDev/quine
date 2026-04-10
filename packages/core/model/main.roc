@@ -4,6 +4,7 @@ package [
     QuineValue,
     PropertyValue,
     NodeEvent,
+    NodeSnapshot,
 ] {
     id: "../id/main.roc",
 }
