@@ -78,3 +78,13 @@ GitHub Actions (`.github/workflows/ci.yml`): Java 21, runs `sbt test`, `quine/as
 - Common SBT settings live in `project/QuineSettings.scala`
 - The package namespace is `com.thatdot.quine`
 - The actor framework is Apache Pekko (not Akka) — imports are `org.apache.pekko`
+
+## Output Styles
+
+When presenting **2+ alternative options** for an architectural, API, or implementation choice, follow the format defined in `.claude/output-styles/options-comparison.md`. That style requires:
+
+1. A comparison table with aspects as rows, options as columns, bolded winners per row
+2. A "deciding factor" section naming the dominant use case and explaining which option handles it best
+3. A decisive recommendation with grounded reasoning
+
+Do NOT use this style for single-option questions, yes/no questions, or trivial choices.
