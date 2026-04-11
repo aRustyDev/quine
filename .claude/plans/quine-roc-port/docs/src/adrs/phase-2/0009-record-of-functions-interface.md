@@ -17,23 +17,13 @@ have traits in the same form. Three approaches were evaluated:
 
 Use **Option A: record of functions**.
 
-`PersistenceAgent` is a Roc record type:
+`PersistenceAgent` is a Roc record type. Concrete implementations like
+`InMemoryPersistor.new : Config -> PersistenceAgent` construct and return
+a record. Callers hold and pass `PersistenceAgent` values.
 
-```roc
-PersistenceAgent : {
-    persist_snapshot : QuineId, NodeSnapshot -> Result {} [...],
-    get_latest_snapshot : QuineId -> Result NodeSnapshot [NotFound, ...],
-    persist_events : QuineId, List TimestampedEvent -> Result {} [...],
-    get_events : QuineId, EventTime, EventTime -> Result (List TimestampedEvent) [...],
-    delete_node : QuineId -> Result {} [...],
-    set_metadata : Str, List U8 -> Result {} [...],
-    get_metadata : Str -> Result (List U8) [NotFound, ...],
-    ...
-}
-```
-
-Concrete implementations like `InMemoryPersistor.new : Config -> PersistenceAgent`
-construct and return a record. Callers hold and pass `PersistenceAgent` values.
+**See ADR-012 for the concrete field list**, which applies the
+append-vs-put naming convention that enforces event immutability at
+the API boundary.
 
 ## Consequences
 
