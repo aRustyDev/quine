@@ -10,6 +10,7 @@ module [
     get_events,
     delete_events_for_node,
     put_snapshot,
+    get_latest_snapshot,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -198,6 +199,40 @@ put_snapshot = |@Persistor(state), qid, snap|
     new_node_snapshots = Dict.insert(node_snapshots, snap.time, snap)
     new_snapshots = Dict.insert(state.snapshots, qid, new_node_snapshots)
     Ok(@Persistor({ state & snapshots: new_snapshots }))
+
+## Retrieve the most recent snapshot for a node at or before the given time.
+##
+## Returns `Err NotFound` if no snapshot exists for the node at or before the
+## time. Used on node wake-up to restore state: take the latest snapshot,
+## then replay journal events after the snapshot's time.
+get_latest_snapshot :
+    Persistor,
+    QuineId,
+    EventTime
+    -> Result NodeSnapshot [NotFound, Unavailable, Timeout]
+get_latest_snapshot = |@Persistor(state), qid, up_to_time|
+    when Dict.get(state.snapshots, qid) is
+        Err(_) -> Err(NotFound)
+        Ok(node_snapshots) ->
+            up_to_u64 = event_time_to_u64(up_to_time)
+            # Find the snapshot with the largest time <= up_to_u64
+            result = Dict.walk(
+                node_snapshots,
+                Err(NotFound),
+                |acc, t, snap|
+                    t_u64 = event_time_to_u64(t)
+                    if t_u64 <= up_to_u64 then
+                        when acc is
+                            Err(_) -> Ok(snap)
+                            Ok(existing) ->
+                                if t_u64 > event_time_to_u64(existing.time) then
+                                    Ok(snap)
+                                else
+                                    acc
+                    else
+                        acc,
+            )
+            result
 
 # ===== Tests =====
 
@@ -395,5 +430,42 @@ expect
                                 Ok(s) -> Dict.len(s.properties) == 1
                                 _ -> Bool.false
                         _ -> Bool.false
+                Err(_) -> Bool.false
+        Err(_) -> Bool.false
+
+expect
+    # get_latest_snapshot returns NotFound for a node with no snapshots
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    when get_latest_snapshot(p, qid, t) is
+        Err(NotFound) -> Bool.true
+        _ -> Bool.false
+
+expect
+    # get_latest_snapshot returns the most recent snapshot at or before time
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t1 = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    t2 = EventTime.from_parts({ millis: 200, message_seq: 0, event_seq: 0 })
+    t3 = EventTime.from_parts({ millis: 300, message_seq: 0, event_seq: 0 })
+    snap1 : NodeSnapshot
+    snap1 = { properties: Dict.empty({}), edges: [], time: t1 }
+    snap2 : NodeSnapshot
+    snap2 = { properties: Dict.empty({}), edges: [], time: t2 }
+    snap3 : NodeSnapshot
+    snap3 = { properties: Dict.empty({}), edges: [], time: t3 }
+    when put_snapshot(p, qid, snap1) is
+        Ok(p1) ->
+            when put_snapshot(p1, qid, snap2) is
+                Ok(p2) ->
+                    when put_snapshot(p2, qid, snap3) is
+                        Ok(p3) ->
+                            # Query at t2.5 should return snap2
+                            t_query = EventTime.from_parts({ millis: 250, message_seq: 0, event_seq: 0 })
+                            when get_latest_snapshot(p3, qid, t_query) is
+                                Ok(found) -> found.time == t2
+                                Err(_) -> Bool.false
+                        Err(_) -> Bool.false
                 Err(_) -> Bool.false
         Err(_) -> Bool.false
