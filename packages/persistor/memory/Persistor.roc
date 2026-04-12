@@ -12,6 +12,7 @@ module [
     put_snapshot,
     get_latest_snapshot,
     delete_snapshots_for_node,
+    empty_of_quine_data,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -243,6 +244,16 @@ delete_snapshots_for_node :
 delete_snapshots_for_node = |@Persistor(state), qid|
     new_snapshots = Dict.remove(state.snapshots, qid)
     Ok(@Persistor({ state & snapshots: new_snapshots }))
+
+## Returns true if the persistor holds no node data (events or snapshots).
+##
+## Metadata is not considered "quine data" — a persistor with only metadata
+## entries is still considered empty for node purposes.
+empty_of_quine_data :
+    Persistor
+    -> Result Bool [Unavailable, Timeout]
+empty_of_quine_data = |@Persistor(state)|
+    Ok(Dict.is_empty(state.events) and Dict.is_empty(state.snapshots))
 
 # ===== Tests =====
 
@@ -503,4 +514,50 @@ expect
     qid = QuineId.from_bytes([0x01])
     when delete_snapshots_for_node(p, qid) is
         Ok(_) -> Bool.true
+        _ -> Bool.false
+
+expect
+    # empty_of_quine_data returns true on a fresh persistor
+    p = new({})
+    when empty_of_quine_data(p) is
+        Ok(val) -> val == Bool.true
+        _ -> Bool.false
+
+expect
+    # empty_of_quine_data returns false after appending an event
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    e = { event: PropertySet({ key: "a", value: PropertyValue.from_value(Integer(1)) }), at_time: t }
+    when append_events(p, qid, [e]) is
+        Ok(p1) ->
+            when empty_of_quine_data(p1) is
+                Ok(val) -> val == Bool.false
+                _ -> Bool.false
+        _ -> Bool.false
+
+expect
+    # empty_of_quine_data returns true after deleting all events
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    e = { event: PropertySet({ key: "a", value: PropertyValue.from_value(Integer(1)) }), at_time: t }
+    when append_events(p, qid, [e]) is
+        Ok(p1) ->
+            when delete_events_for_node(p1, qid) is
+                Ok(p2) ->
+                    when empty_of_quine_data(p2) is
+                        Ok(val) -> val == Bool.true
+                        _ -> Bool.false
+                _ -> Bool.false
+        _ -> Bool.false
+
+expect
+    # empty_of_quine_data ignores metadata — metadata-only persistor is empty
+    p = new({})
+    when put_metadata(p, "version", [0x01]) is
+        Ok(p1) ->
+            when empty_of_quine_data(p1) is
+                Ok(val) -> val == Bool.true
+                _ -> Bool.false
         _ -> Bool.false
