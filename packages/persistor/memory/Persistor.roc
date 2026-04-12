@@ -119,8 +119,7 @@ append_events = |@Persistor(state), qid, events|
                     when Dict.get(acc, timed.at_time) is
                         Ok(_) -> Break(Err(DuplicateEventTime(timed.at_time)))
                         Err(_) ->
-                            existing = Dict.get(acc, timed.at_time) |> Result.with_default([])
-                            Continue(Ok(Dict.insert(acc, timed.at_time, List.append(existing, timed)))),
+                            Continue(Ok(Dict.insert(acc, timed.at_time, [timed]))),
     )
 
     when dup_check is

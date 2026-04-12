@@ -21,7 +21,6 @@ In-memory `Persistor` backend for the Quine-Roc port.
 - `common` — for error types
 - `core/id` — for `QuineId`, `EventTime`
 - `core/model` — for `NodeSnapshot`, `TimestampedEvent`, `PropertyValue`
-- External: `lukewilliamboswell/roc-json` for JSON serialization (see ADR-015)
 
 ## Scala Counterpart
 

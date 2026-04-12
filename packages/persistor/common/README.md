@@ -10,8 +10,8 @@ Shared types used across persistor backends.
 
 ## Dependencies
 
-- `core/id` — for `QuineId` and `EventTime` references in error variants
-- `core/model` — for any model types referenced in errors
+None. This package has no Roc package dependencies. Error type aliases
+use only Roc built-in types (`Str`).
 
 ## Scala Counterpart
 

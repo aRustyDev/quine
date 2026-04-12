@@ -19,7 +19,7 @@ main! = |_args|
     p0 = Persistor.new({})
     qid = QuineId.from_bytes([0x01, 0x02, 0x03])
 
-    # === Phase 1: build up node state through events ===
+    # === Build up node state through events ===
     state0 = NodeState.empty
     e1 = PropertySet({ key: "name", value: PropertyValue.from_value(Str("Alice")) })
     e2 = PropertySet({ key: "age", value: PropertyValue.from_value(Integer(30)) })
@@ -38,25 +38,38 @@ main! = |_args|
             Ok(p) -> p
             Err(_) -> crash "append_events failed"
 
-    # Take a snapshot at time t2
-    snap = NodeState.to_snapshot(state_pre_crash, t2)
+    # Take a snapshot at t1 (AFTER first event only, NOT after second)
+    snap = NodeState.to_snapshot(state1, t1)
     p2 =
         when Persistor.put_snapshot(p1, qid, snap) is
             Ok(p) -> p
             Err(_) -> crash "put_snapshot failed"
 
-    # === Phase 2: simulate a crash — discard state, keep only the persistor ===
-    # (In real usage, this is process restart + new NodeState from scratch)
+    # === Simulate a crash — discard state, keep only the persistor ===
 
-    # === Phase 3: restore ===
-    # Find the latest snapshot at or before a future time
+    # === Restore ===
+    # 1. Find the latest snapshot
     future_time = EventTime.from_parts({ millis: 1000, message_seq: 0, event_seq: 0 })
     latest_snap =
         when Persistor.get_latest_snapshot(p2, qid, future_time) is
             Ok(s) -> s
             Err(_) -> crash "get_latest_snapshot failed"
 
-    restored_state = NodeState.from_snapshot(latest_snap)
+    # 2. Restore base state from snapshot
+    base_state = NodeState.from_snapshot(latest_snap)
+
+    # 3. Get journal events AFTER the snapshot time and replay them
+    events_after_snap =
+        when Persistor.get_events(p2, qid, { start: EventTime.advance_event(latest_snap.time), end: future_time }) is
+            Ok(events) -> events
+            Err(_) -> crash "get_events failed"
+
+    # 4. Replay events on top of base state
+    restored_state = List.walk(
+        events_after_snap,
+        base_state,
+        |state, timed| NodeState.apply_event(state, timed.event),
+    )
 
     # === Verify ===
     if restored_state == state_pre_crash then
