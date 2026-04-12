@@ -19,7 +19,6 @@ module [
 import id.QuineId exposing [QuineId]
 import id.EventTime exposing [EventTime]
 import model.PropertyValue
-import model.HalfEdge
 import model.NodeEvent exposing [TimestampedEvent]
 import model.NodeSnapshot exposing [NodeSnapshot]
 
