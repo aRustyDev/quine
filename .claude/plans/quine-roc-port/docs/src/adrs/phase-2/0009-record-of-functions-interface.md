@@ -1,10 +1,29 @@
 # ADR-009: Record-of-functions interface for PersistenceAgent
 
-**Status:** Accepted
+**Status:** Superseded by ADR-013
 
 **Date:** 2026-04-11
 
-## Context
+**Superseded on:** 2026-04-11 (same day, during ongoing Phase 2 brainstorming)
+
+## Why superseded
+
+Research into Roc's state-management primitives revealed that the
+record-of-functions approach — while idiomatic for stateless abstractions
+like `QuineIdProvider` — does not fit the persistence layer's needs.
+The core issue: **Roc has no mutable state primitive**. The
+record-of-functions pattern implicitly assumes you can close over mutable
+state, which cannot be done in pure Roc without inventing a custom host.
+
+See ADR-013 for the full analysis and the replacement decision
+(module-based interface with opaque `Persistor` handle).
+
+The original context, alternatives, and reasoning of this ADR are
+preserved below for historical continuity.
+
+---
+
+## Original Context (preserved)
 
 Scala Quine's `PersistenceAgent` is a trait with ~24 methods. Roc doesn't
 have traits in the same form. Three approaches were evaluated:
@@ -13,48 +32,41 @@ have traits in the same form. Three approaches were evaluated:
 - **B. Module-based interface** — Each persistor module exposes top-level functions (`InMemoryPersistor.persist_snapshot : State, QuineId, NodeSnapshot -> Result State Err`). Callers import the specific module. No unified type.
 - **C. Ability-based** — Define a Roc ability `PersistenceAgent implements persist_snapshot : a, ...`. Concrete implementations implement the ability.
 
-## Decision
+## Original Decision (superseded)
 
 Use **Option A: record of functions**.
 
-`PersistenceAgent` is a Roc record type. Concrete implementations like
-`InMemoryPersistor.new : Config -> PersistenceAgent` construct and return
-a record. Callers hold and pass `PersistenceAgent` values.
+`PersistenceAgent` was a Roc record type. Concrete implementations like
+`InMemoryPersistor.new : Config -> PersistenceAgent` would construct and
+return a record. Callers would hold and pass `PersistenceAgent` values.
 
-**See ADR-012 for the concrete field list**, which applies the
-append-vs-put naming convention that enforces event immutability at
-the API boundary.
+## Why the original decision didn't work
 
-## Consequences
+1. **Roc has no mutable state.** A record of functions requires each function
+   to close over the persistor's internal state. Since the state is
+   mutable at the semantic level (each call produces a new version of
+   the dicts), the closure would have to hold an immutable snapshot. That
+   means every operation would have to return a new `PersistenceAgent`
+   record with new closures pointing at the new state — which defeats
+   the purpose of using a record as a "handle" and adds complexity with
+   no benefit.
 
-- **First-class persistor values**: can be stored in a list, passed to a function, swapped at runtime via config.
-- **Decorator chains are trivial**: `BloomFilter.new : PersistenceAgent -> PersistenceAgent`. Scala's `ExceptionWrappingPersistenceAgent` / `BloomFilteredPersistor` / `PartitionedPersistor` patterns all translate cleanly.
-- **Runtime swap works**: `if config.useRocksDB then RocksDb.new(cfg) else InMemory.new(cfg)` — both sides return the same record type.
-- **Mocking for tests is trivial**: construct an ad-hoc record with stub functions.
-- **Boilerplate cost**: every concrete persistor needs a `new` function that explicitly wires up every method. No inheritance or default impls.
-- **Each implementation holds its own state in a closure or explicit state parameter**: functions in the record must close over the persistor's internal state, since records don't have associated methods with implicit self.
+2. **Refcount-driven in-place mutation doesn't help.** Roc's optimization
+   that turns `Dict.insert` into in-place mutation at refcount 1 works
+   for state-threaded values, not for values captured in long-lived
+   closures.
 
-## Rejected: Module-based (B)
+3. **The "distribution story" under Option A is unclear.** To make
+   operations effectful (`=>`) for future distribution, the record
+   would need some way for each function to run as an effect. There's
+   no clean path from "record of pure functions" to "record of Task
+   operations" in current Roc.
 
-Module-based appears simpler but collapses into A as soon as runtime
-polymorphism is needed. Every real persistence system needs "in-memory for
-tests, real backend for prod" — that choice can't be made at compile time.
-A wrapper layer that dispatches between modules duplicates the API, which
-is exactly Option A in disguise.
+## Replaced By
 
-## Rejected: Ability-based (C)
+- **ADR-013** — Module-based interface with opaque `Persistor` handle and state-threading operations. First-class values are preserved via the opaque handle; polymorphism is deferred until a second backend lands.
 
-Abilities are type constraints, not first-class values. Decorator chains,
-storing persistors in a list, holding a persistor in a config struct —
-all are awkward or impossible. Additionally, Roc's ability system is
-pre-1.0 and custom abilities beyond stdlib (Eq, Hash) are less battle-tested.
+## Related
 
-A separate investigation (FR 001) will explore whether abilities could
-work for this interface after the maturity improves, as a potential
-upstream contribution opportunity.
-
-## Watch For
-
-- If record construction becomes unwieldy (e.g., 40+ fields), consider splitting into smaller sub-interfaces grouped by concern (NodePersistor, MetadataPersistor, StandingQueryPersistor).
-- If a Roc ability system feature lands that supports first-class ability-instances, revisit the decision.
-- Related: FR 001 (Roc abilities exploration) is the post-Phase-2 experiment.
+- ADR-013 (replacement decision)
+- FR 001 (Roc abilities exploration) — may offer a third path after Roc's ability system matures
