@@ -11,6 +11,7 @@ module [
     delete_events_for_node,
     put_snapshot,
     get_latest_snapshot,
+    delete_snapshots_for_node,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -233,6 +234,15 @@ get_latest_snapshot = |@Persistor(state), qid, up_to_time|
                         acc,
             )
             result
+
+## Delete all snapshots for a node. No-op if the node has no snapshots.
+delete_snapshots_for_node :
+    Persistor,
+    QuineId
+    -> Result Persistor [Unavailable, Timeout]
+delete_snapshots_for_node = |@Persistor(state), qid|
+    new_snapshots = Dict.remove(state.snapshots, qid)
+    Ok(@Persistor({ state & snapshots: new_snapshots }))
 
 # ===== Tests =====
 
@@ -469,3 +479,28 @@ expect
                         Err(_) -> Bool.false
                 Err(_) -> Bool.false
         Err(_) -> Bool.false
+
+expect
+    # delete_snapshots_for_node removes all snapshots for a node
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    snap : NodeSnapshot
+    snap = { properties: Dict.empty({}), edges: [], time: t }
+    when put_snapshot(p, qid, snap) is
+        Ok(p1) ->
+            when delete_snapshots_for_node(p1, qid) is
+                Ok(p2) ->
+                    when get_latest_snapshot(p2, qid, t) is
+                        Err(NotFound) -> Bool.true
+                        _ -> Bool.false
+                Err(_) -> Bool.false
+        Err(_) -> Bool.false
+
+expect
+    # delete_snapshots_for_node on a missing node is a no-op
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    when delete_snapshots_for_node(p, qid) is
+        Ok(_) -> Bool.true
+        _ -> Bool.false
