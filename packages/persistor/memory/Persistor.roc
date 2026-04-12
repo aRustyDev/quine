@@ -13,6 +13,7 @@ module [
     get_latest_snapshot,
     delete_snapshots_for_node,
     empty_of_quine_data,
+    shutdown,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -254,6 +255,20 @@ empty_of_quine_data :
     -> Result Bool [Unavailable, Timeout]
 empty_of_quine_data = |@Persistor(state)|
     Ok(Dict.is_empty(state.events) and Dict.is_empty(state.snapshots))
+
+## Cleanly shut down the persistor.
+##
+## For the in-memory backend, this is a no-op — there's nothing to flush,
+## close, or release. Future backends will use this to close file handles,
+## flush write buffers, disconnect from remote storage, etc.
+##
+## This operation consumes the Persistor — callers should not use the
+## handle after calling shutdown. The Roc type system doesn't enforce this,
+## so callers must discipline themselves.
+shutdown :
+    Persistor
+    -> Result {} [Unavailable, Timeout]
+shutdown = |_| Ok({})
 
 # ===== Tests =====
 
@@ -559,5 +574,22 @@ expect
         Ok(p1) ->
             when empty_of_quine_data(p1) is
                 Ok(val) -> val == Bool.true
+                _ -> Bool.false
+        _ -> Bool.false
+
+expect
+    # shutdown returns Ok on a fresh persistor
+    p = new({})
+    when shutdown(p) is
+        Ok({}) -> Bool.true
+        _ -> Bool.false
+
+expect
+    # shutdown returns Ok on a persistor with data
+    p = new({})
+    when put_metadata(p, "k", [0x01]) is
+        Ok(p1) ->
+            when shutdown(p1) is
+                Ok({}) -> Bool.true
                 _ -> Bool.false
         _ -> Bool.false
