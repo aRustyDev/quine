@@ -9,6 +9,7 @@ module [
     append_events,
     get_events,
     delete_events_for_node,
+    put_snapshot,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -183,6 +184,21 @@ delete_events_for_node = |@Persistor(state), qid|
     new_events = Dict.remove(state.events, qid)
     Ok(@Persistor({ state & events: new_events }))
 
+## Store a snapshot for a node at the snapshot's embedded timestamp.
+##
+## Overwrites any existing snapshot at the same `(QuineId, EventTime)` —
+## snapshots use last-write-wins semantics (unlike journal events).
+put_snapshot :
+    Persistor,
+    QuineId,
+    NodeSnapshot
+    -> Result Persistor [Unavailable, Timeout]
+put_snapshot = |@Persistor(state), qid, snap|
+    node_snapshots = Dict.get(state.snapshots, qid) |> Result.with_default(Dict.empty({}))
+    new_node_snapshots = Dict.insert(node_snapshots, snap.time, snap)
+    new_snapshots = Dict.insert(state.snapshots, qid, new_node_snapshots)
+    Ok(@Persistor({ state & snapshots: new_snapshots }))
+
 # ===== Tests =====
 
 expect
@@ -344,3 +360,40 @@ expect
     when delete_events_for_node(p, qid) is
         Ok(_) -> Bool.true
         _ -> Bool.false
+
+expect
+    # put_snapshot stores a snapshot
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    snap : NodeSnapshot
+    snap = { properties: Dict.empty({}), edges: [], time: t }
+    when put_snapshot(p, qid, snap) is
+        Ok(@Persistor(state)) ->
+            when Dict.get(state.snapshots, qid) is
+                Ok(_) -> Bool.true
+                _ -> Bool.false
+        Err(_) -> Bool.false
+
+expect
+    # put_snapshot overwrites at same time (last-write-wins)
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    snap1 : NodeSnapshot
+    snap1 = { properties: Dict.empty({}), edges: [], time: t }
+    props = Dict.empty({}) |> Dict.insert("k", PropertyValue.from_value(Integer(1)))
+    snap2 : NodeSnapshot
+    snap2 = { properties: props, edges: [], time: t }
+    when put_snapshot(p, qid, snap1) is
+        Ok(p1) ->
+            when put_snapshot(p1, qid, snap2) is
+                Ok(@Persistor(state)) ->
+                    when Dict.get(state.snapshots, qid) is
+                        Ok(node_snaps) ->
+                            when Dict.get(node_snaps, t) is
+                                Ok(s) -> Dict.len(s.properties) == 1
+                                _ -> Bool.false
+                        _ -> Bool.false
+                Err(_) -> Bool.false
+        Err(_) -> Bool.false
