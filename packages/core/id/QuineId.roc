@@ -11,7 +11,7 @@ module [
 ##
 ## QuineIds are arbitrary byte arrays. Different ID schemes (UUIDs, longs, strings)
 ## are wrapped in this opaque type via QuineIdProvider implementations.
-QuineId := List U8 implements [Eq { is_eq: is_eq }]
+QuineId := List U8 implements [Eq { is_eq: is_eq }, Hash]
 
 is_eq : QuineId, QuineId -> Bool
 is_eq = |@QuineId(a), @QuineId(b)| a == b
