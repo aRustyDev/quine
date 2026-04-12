@@ -28,7 +28,27 @@ Three options were identified in the concurrency analysis:
 
 **Option C -- Shared thread pool with per-node locks**: Node "messages" become function calls protected by per-node mutexes. No task/actor overhead, but callers block waiting for locks and the asynchronous message-passing model is lost.
 
-**Key decision point**: This must be resolved before Phase 3 (Graph Structure). The choice ripples through standing queries (cross-node subscription messages), query languages (on-node execution), and ingest (write parallelism). Early prototyping of Option B with Roc's Task system is recommended.
+**Option D -- Differential dataflow (added during Phase 2 brainstorming)**: Instead of modeling nodes as processes, model the entire computation as a dataflow graph where operators process *changes* (diffs) to collections. Based on Timely Dataflow / Differential Dataflow (Rust) and Naiad. This is the most mathematically principled approach and is naturally distributed — each operator can run on any worker, and operators exchange deltas via message-passing. Excellent fit for standing queries (which are inherently incremental). The conceptual cost is steep: Cypher-like queries must be translated into dataflow plans, and ad-hoc traversals are harder to model. For a streaming graph with heavy standing-query workloads, this may actually be the *best* fit if we can absorb the learning curve and don't depend on existing differential dataflow libraries (none exist in Roc). Effectively this option is "build Timely Dataflow in Roc" as a subproject.
+
+**Key decision point**: This must be resolved before Phase 3 (Graph Structure). The choice ripples through standing queries (cross-node subscription messages), query languages (on-node execution), and ingest (write parallelism). Phase 3 brainstorming will evaluate A/B/C/D explicitly.
+
+### Supernode Handling (cross-cutting concern for all options)
+
+**Added during Phase 2 brainstorming** from cross-checking with another architectural analysis.
+
+A "supernode" is a graph node with an extreme number of edges — millions of follows on a celebrity's social graph, millions of hashtag uses, etc. Supernodes challenge actor-per-node designs in particular:
+
+- **Memory pressure**: A single node's adjacency list may exceed what fits cheaply in memory, and its sleep/wake cycle becomes expensive.
+- **Message storms**: A property update on a supernode can trigger standing query re-evaluation across all its edges. Under actor-per-node, this generates one message per outgoing edge.
+- **Hot-spotting**: In distributed partition-based designs, the partition holding a supernode becomes a traffic hotspot regardless of how well the overall graph is partitioned.
+
+**Mitigations to consider in Phase 3**:
+- **Edge splitting**: Split a supernode's edge set into fragments stored separately, each managed independently. Standing queries walk fragments lazily.
+- **Differential dataflow operators that natively handle high fan-out** (Option D inherently handles this better).
+- **Per-edge-type locality**: Co-locate edges of the same type for a supernode, so pattern matches don't force cross-partition lookups.
+- **Bounded fan-out for standing queries**: When a supernode's neighborhood is too large, propagate match state lazily rather than eagerly.
+
+This concern feeds into the Phase 3 concurrency decision and should not be deferred until supernodes are encountered in production — the architecture must anticipate them.
 
 **Additional considerations**:
 - The sleep/wake lifecycle becomes a cache eviction problem: node state lives in a bounded LRU cache, evicted nodes are persisted, and incoming messages for evicted nodes trigger restoration.
