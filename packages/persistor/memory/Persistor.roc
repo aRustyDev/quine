@@ -5,6 +5,7 @@ module [
     put_metadata,
     get_metadata,
     delete_metadata,
+    get_all_metadata,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -79,6 +80,14 @@ delete_metadata = |@Persistor(state), key|
     new_metadata = Dict.remove(state.metadata, key)
     Ok(@Persistor({ state & metadata: new_metadata }))
 
+## Retrieve all metadata as a Dict. Returns an empty Dict if no metadata
+## has been stored.
+get_all_metadata :
+    Persistor
+    -> Result (Dict Str (List U8)) [Unavailable, Timeout]
+get_all_metadata = |@Persistor(state)|
+    Ok(state.metadata)
+
 # ===== Tests =====
 
 expect
@@ -131,3 +140,23 @@ expect
     when delete_metadata(p, "never-existed") is
         Ok(_) -> Bool.true
         _ -> Bool.false
+
+expect
+    # get_all_metadata returns empty Dict on fresh persistor
+    p = new({})
+    when get_all_metadata(p) is
+        Ok(m) -> Dict.is_empty(m)
+        Err(_) -> Bool.false
+
+expect
+    # get_all_metadata returns all stored keys
+    p = new({})
+    when put_metadata(p, "a", [0x01]) is
+        Ok(p1) ->
+            when put_metadata(p1, "b", [0x02]) is
+                Ok(p2) ->
+                    when get_all_metadata(p2) is
+                        Ok(m) -> Dict.len(m) == 2
+                        Err(_) -> Bool.false
+                Err(_) -> Bool.false
+        Err(_) -> Bool.false
