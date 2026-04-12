@@ -17,7 +17,7 @@ module [
 ## - Bottom 8 bits: event sequence (disambiguates events from the same message)
 ##
 ## This packing gives every event a globally unique, totally-ordered timestamp.
-EventTime := U64 implements [Eq { is_eq: is_eq }]
+EventTime := U64 implements [Eq { is_eq: is_eq }, Hash]
 
 is_eq : EventTime, EventTime -> Bool
 is_eq = |@EventTime(a), @EventTime(b)| a == b
