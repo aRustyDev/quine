@@ -6,6 +6,7 @@ module [
     get_metadata,
     delete_metadata,
     get_all_metadata,
+    append_events,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -88,6 +89,40 @@ get_all_metadata :
 get_all_metadata = |@Persistor(state)|
     Ok(state.metadata)
 
+## Append a batch of events to a node's journal.
+##
+## Rejects with `DuplicateEventTime` if any event has an `EventTime` that
+## already exists for the same node. This structurally enforces event
+## immutability (see ADR-012).
+append_events :
+    Persistor,
+    QuineId,
+    List TimestampedEvent
+    -> Result Persistor [DuplicateEventTime EventTime, Unavailable, Timeout]
+append_events = |@Persistor(state), qid, events|
+    node_events = Dict.get(state.events, qid) |> Result.with_default(Dict.empty({}))
+
+    # Check for duplicates before applying any
+    dup_check = List.walk_until(
+        events,
+        Ok(node_events),
+        |acc_result, timed|
+            when acc_result is
+                Err(_) -> Break(acc_result)
+                Ok(acc) ->
+                    when Dict.get(acc, timed.at_time) is
+                        Ok(_) -> Break(Err(DuplicateEventTime(timed.at_time)))
+                        Err(_) ->
+                            existing = Dict.get(acc, timed.at_time) |> Result.with_default([])
+                            Continue(Ok(Dict.insert(acc, timed.at_time, List.append(existing, timed)))),
+    )
+
+    when dup_check is
+        Err(e) -> Err(e)
+        Ok(new_node_events) ->
+            new_events = Dict.insert(state.events, qid, new_node_events)
+            Ok(@Persistor({ state & events: new_events }))
+
 # ===== Tests =====
 
 expect
@@ -160,3 +195,41 @@ expect
                         Err(_) -> Bool.false
                 Err(_) -> Bool.false
         Err(_) -> Bool.false
+
+expect
+    # append_events adds a single event
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    event = PropertySet({ key: "name", value: PropertyValue.from_value(Str("Alice")) })
+    timed = { event, at_time: t }
+    when append_events(p, qid, [timed]) is
+        Ok(@Persistor(state)) ->
+            Dict.len(state.events) == 1
+        Err(_) -> Bool.false
+
+expect
+    # append_events rejects duplicate EventTime
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    e1 = { event: PropertySet({ key: "a", value: PropertyValue.from_value(Integer(1)) }), at_time: t }
+    e2 = { event: PropertySet({ key: "b", value: PropertyValue.from_value(Integer(2)) }), at_time: t }
+    when append_events(p, qid, [e1]) is
+        Ok(p1) ->
+            when append_events(p1, qid, [e2]) is
+                Err(DuplicateEventTime(_)) -> Bool.true
+                _ -> Bool.false
+        Err(_) -> Bool.false
+
+expect
+    # append_events with multiple events at distinct times succeeds
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t1 = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    t2 = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 1 })
+    e1 = { event: PropertySet({ key: "a", value: PropertyValue.from_value(Integer(1)) }), at_time: t1 }
+    e2 = { event: PropertySet({ key: "b", value: PropertyValue.from_value(Integer(2)) }), at_time: t2 }
+    when append_events(p, qid, [e1, e2]) is
+        Ok(_) -> Bool.true
+        _ -> Bool.false
