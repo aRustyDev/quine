@@ -4,6 +4,7 @@ module [
     new,
     put_metadata,
     get_metadata,
+    delete_metadata,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -69,6 +70,15 @@ get_metadata = |@Persistor(state), key|
         Ok(value) -> Ok(value)
         Err(_) -> Err(NotFound)
 
+## Remove a metadata key. No-op if the key does not exist.
+delete_metadata :
+    Persistor,
+    Str
+    -> Result Persistor [Unavailable, Timeout]
+delete_metadata = |@Persistor(state), key|
+    new_metadata = Dict.remove(state.metadata, key)
+    Ok(@Persistor({ state & metadata: new_metadata }))
+
 # ===== Tests =====
 
 expect
@@ -100,4 +110,24 @@ expect
     p = new({})
     when get_metadata(p, "missing") is
         Err(NotFound) -> Bool.true
+        _ -> Bool.false
+
+expect
+    # delete_metadata removes a stored key
+    p = new({})
+    when put_metadata(p, "k", [0xFF]) is
+        Ok(p2) ->
+            when delete_metadata(p2, "k") is
+                Ok(p3) ->
+                    when get_metadata(p3, "k") is
+                        Err(NotFound) -> Bool.true
+                        _ -> Bool.false
+                Err(_) -> Bool.false
+        Err(_) -> Bool.false
+
+expect
+    # delete_metadata on missing key is a no-op (returns Ok)
+    p = new({})
+    when delete_metadata(p, "never-existed") is
+        Ok(_) -> Bool.true
         _ -> Bool.false
