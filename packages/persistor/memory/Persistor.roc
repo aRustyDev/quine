@@ -8,6 +8,7 @@ module [
     get_all_metadata,
     append_events,
     get_events,
+    delete_events_for_node,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -173,6 +174,15 @@ event_time_to_u64 = |t|
     |> Num.bitwise_or(Num.shift_left_by(msg, 8))
     |> Num.bitwise_or(ev)
 
+## Delete all journal events for a node. No-op if the node has no events.
+delete_events_for_node :
+    Persistor,
+    QuineId
+    -> Result Persistor [Unavailable, Timeout]
+delete_events_for_node = |@Persistor(state), qid|
+    new_events = Dict.remove(state.events, qid)
+    Ok(@Persistor({ state & events: new_events }))
+
 # ===== Tests =====
 
 expect
@@ -309,4 +319,28 @@ expect
             when get_events(p1, qid, { start: t1, end: t2 }) is
                 Ok(events) -> List.len(events) == 2
                 _ -> Bool.false
+        _ -> Bool.false
+
+expect
+    # delete_events_for_node removes all events for a node
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    e = { event: PropertySet({ key: "a", value: PropertyValue.from_value(Integer(1)) }), at_time: t }
+    when append_events(p, qid, [e]) is
+        Ok(p1) ->
+            when delete_events_for_node(p1, qid) is
+                Ok(p2) ->
+                    when get_events(p2, qid, { start: t, end: t }) is
+                        Ok([]) -> Bool.true
+                        _ -> Bool.false
+                Err(_) -> Bool.false
+        Err(_) -> Bool.false
+
+expect
+    # delete_events_for_node on a missing node is a no-op
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    when delete_events_for_node(p, qid) is
+        Ok(_) -> Bool.true
         _ -> Bool.false
