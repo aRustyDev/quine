@@ -7,6 +7,7 @@ module [
     delete_metadata,
     get_all_metadata,
     append_events,
+    get_events,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -123,6 +124,55 @@ append_events = |@Persistor(state), qid, events|
             new_events = Dict.insert(state.events, qid, new_node_events)
             Ok(@Persistor({ state & events: new_events }))
 
+## Retrieve events for a node within an inclusive time range.
+##
+## Returns events where `start <= at_time <= end`, ordered by time ascending.
+## Returns an empty list if no events exist in the range (not an error).
+get_events :
+    Persistor,
+    QuineId,
+    { start : EventTime, end : EventTime }
+    -> Result (List TimestampedEvent) [Unavailable, Timeout]
+get_events = |@Persistor(state), qid, { start, end }|
+    when Dict.get(state.events, qid) is
+        Err(_) -> Ok([])
+        Ok(node_events) ->
+            # Iterate the node's event dict, filter by range, flatten lists
+            all_in_range = Dict.walk(
+                node_events,
+                [],
+                |acc, t, events_list|
+                    if is_in_range(t, start, end) then
+                        List.concat(acc, events_list)
+                    else
+                        acc,
+            )
+            # Sort by at_time ascending
+            sorted = List.sort_with(
+                all_in_range,
+                |a, b| Num.compare(event_time_to_u64(a.at_time), event_time_to_u64(b.at_time)),
+            )
+            Ok(sorted)
+
+is_in_range : EventTime, EventTime, EventTime -> Bool
+is_in_range = |t, start, end|
+    t_val = event_time_to_u64(t)
+    start_val = event_time_to_u64(start)
+    end_val = event_time_to_u64(end)
+    t_val >= start_val and t_val <= end_val
+
+# Helper: Extract the underlying U64 from an EventTime by reconstructing it from parts.
+# This is needed because EventTime is opaque and doesn't expose its inner value directly.
+# The bit-packed format means we can't easily compare without decomposing.
+event_time_to_u64 : EventTime -> U64
+event_time_to_u64 = |t|
+    m = EventTime.millis(t)
+    msg = Num.to_u64(EventTime.message_seq(t))
+    ev = Num.to_u64(EventTime.event_seq(t))
+    Num.shift_left_by(m, 22)
+    |> Num.bitwise_or(Num.shift_left_by(msg, 8))
+    |> Num.bitwise_or(ev)
+
 # ===== Tests =====
 
 expect
@@ -232,4 +282,31 @@ expect
     e2 = { event: PropertySet({ key: "b", value: PropertyValue.from_value(Integer(2)) }), at_time: t2 }
     when append_events(p, qid, [e1, e2]) is
         Ok(_) -> Bool.true
+        _ -> Bool.false
+
+expect
+    # get_events on a node with no events returns empty
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t1 = EventTime.from_parts({ millis: 0, message_seq: 0, event_seq: 0 })
+    t2 = EventTime.from_parts({ millis: 1000, message_seq: 0, event_seq: 0 })
+    when get_events(p, qid, { start: t1, end: t2 }) is
+        Ok([]) -> Bool.true
+        _ -> Bool.false
+
+expect
+    # get_events returns events within the range
+    p = new({})
+    qid = QuineId.from_bytes([0x01])
+    t1 = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
+    t2 = EventTime.from_parts({ millis: 200, message_seq: 0, event_seq: 0 })
+    t3 = EventTime.from_parts({ millis: 300, message_seq: 0, event_seq: 0 })
+    e1 = { event: PropertySet({ key: "a", value: PropertyValue.from_value(Integer(1)) }), at_time: t1 }
+    e2 = { event: PropertySet({ key: "b", value: PropertyValue.from_value(Integer(2)) }), at_time: t2 }
+    e3 = { event: PropertySet({ key: "c", value: PropertyValue.from_value(Integer(3)) }), at_time: t3 }
+    when append_events(p, qid, [e1, e2, e3]) is
+        Ok(p1) ->
+            when get_events(p1, qid, { start: t1, end: t2 }) is
+                Ok(events) -> List.len(events) == 2
+                _ -> Bool.false
         _ -> Bool.false
