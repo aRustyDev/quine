@@ -2,6 +2,7 @@ module [
     Persistor,
     Config,
     new,
+    put_metadata,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -43,6 +44,18 @@ new = |_config|
         metadata: Dict.empty({}),
     })
 
+## Store an opaque byte value under a metadata key.
+##
+## Overwrites any existing value at the key (last-write-wins semantics).
+put_metadata :
+    Persistor,
+    Str,
+    List U8
+    -> Result Persistor [Unavailable, Timeout]
+put_metadata = |@Persistor(state), key, value|
+    new_metadata = Dict.insert(state.metadata, key, value)
+    Ok(@Persistor({ state & metadata: new_metadata }))
+
 # ===== Tests =====
 
 expect
@@ -50,3 +63,11 @@ expect
     p = new({})
     when p is
         @Persistor(_) -> Bool.true
+
+expect
+    # put_metadata stores a value at a key
+    p = new({})
+    when put_metadata(p, "version", [0x01, 0x02]) is
+        Ok(@Persistor(state)) ->
+            Dict.get(state.metadata, "version") == Ok([0x01, 0x02])
+        Err(_) -> Bool.false
