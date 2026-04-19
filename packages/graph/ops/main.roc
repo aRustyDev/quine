@@ -1,10 +1,9 @@
 package [
-    Lru,
-    Dispatch,
-    SleepWake,
-    ShardState,
+    GraphOps,
 ] {
     id: "../../core/id/main.roc",
     model: "../../core/model/main.roc",
     types: "../types/main.roc",
+    routing: "../routing/main.roc",
+    shard: "../shard/main.roc",
 }
