@@ -83,3 +83,7 @@ metrics-logs
 node_modules/
 /package-lock.json
 .vite
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads-credential-key
