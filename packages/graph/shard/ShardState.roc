@@ -3,6 +3,10 @@ module [
     new,
     handle_message,
     on_timer,
+    pending_effects,
+    node_entry,
+    with_awake_node,
+    with_lru_entry,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -123,6 +127,29 @@ on_timer = |@ShardState(s), now|
             nodes: final_nodes,
             pending_effects: all_effects,
         })
+
+## Return the pending effects list from a ShardState (for testing).
+pending_effects : ShardState -> List Effect
+pending_effects = |@ShardState(s)| s.pending_effects
+
+## Return the NodeEntry for a given QuineId, if present (for testing).
+node_entry : ShardState, QuineId -> Result NodeEntry [KeyNotFound]
+node_entry = |@ShardState(s), qid| Dict.get(s.nodes, qid)
+
+## Insert an Awake NodeEntry into a ShardState (for testing).
+##
+## Replaces any existing entry for `qid`.  Does not update the LRU dict —
+## call with_lru_entry separately if the LRU is needed.
+with_awake_node : ShardState, QuineId, NodeEntry -> ShardState
+with_awake_node = |@ShardState(s), qid, entry|
+    @ShardState({ s & nodes: Dict.insert(s.nodes, qid, entry) })
+
+## Insert an LRU entry for a node (for testing).
+##
+## Equivalent to calling Lru.touch with the given timestamp and cost.
+with_lru_entry : ShardState, QuineId, U64, I64 -> ShardState
+with_lru_entry = |@ShardState(s), qid, ts, cost|
+    @ShardState({ s & lru_entries: Lru.touch(s.lru_entries, qid, ts, cost) })
 
 # ===== Tests =====
 

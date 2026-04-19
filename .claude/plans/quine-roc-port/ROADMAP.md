@@ -16,7 +16,7 @@ For each layer: read analysis → design Roc equivalent → build with tests →
 
 - [x] Phase 1: Graph Node Model — foundational types (QuineId, QuineValue, HalfEdge, NodeChangeEvent, EventTime, NodeSnapshot, QuineIdProvider)
 - [x] Phase 2: Persistence Interfaces — PersistenceAgent interface, PersistenceConfig, BinaryFormat, InMemoryPersistor; defer RocksDB FFI and Cassandra
-- [ ] Phase 3: Graph Structure & Concurrency — shard routing, node lifecycle (sleep/wake), in-memory limits (LRU), message routing (relayTell/relayAsk), namespace support; **resolve actor-replacement design here**
+- [ ] Phase 3: Graph Structure & Concurrency — shard routing, node lifecycle (sleep/wake), in-memory limits (LRU), message routing (relayTell/relayAsk), namespace support; **Phase 3b (Roc graph layer) complete**; Phase 3a (custom Roc platform) pending; shard-managed event loops (ADR-016); custom Roc platform (ADR-017)
 - [ ] Phase 4: Standing Queries (with minimal Cypher expression evaluator) — MVSQ AST, per-node state machines, WatchableEventIndex, cross-edge subscriptions, result diffing, backpressure; DGB/v1 system deferred
 - [ ] Phase 5: Query Languages — Cypher parser (recursive descent), Query IR, compiler, interpreter, standing query pattern compiler; Gremlin deferred
 - [ ] Phase 6: Ingest & Outputs — V2 architecture only; source abstraction, framing, decoding, Cypher execution per record; output filter/enrich/serialize/deliver; recipe system; external connectors (Kafka, AWS) as sub-phases
