@@ -5,8 +5,10 @@ platform "quine-graph"
         on_timer! : ShardState, U8 => ShardState,
     }
     exposes [Effect]
-    packages {}
-    imports []
+    packages {
+        id: "../packages/core/id/main.roc",
+    }
+    imports [id.QuineId]
     provides [init_shard_for_host!, handle_message_for_host!, on_timer_for_host!]
 
 ## Called once per shard at startup. Wraps the app's init_shard! with Box.
