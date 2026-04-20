@@ -10,4 +10,5 @@ package [
     standing_index: "../standing/index/main.roc",
     standing_state: "../standing/state/main.roc",
     standing_result: "../standing/result/main.roc",
+    standing_messages: "../standing/messages/main.roc",
 }

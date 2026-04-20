@@ -11,6 +11,7 @@ package [
     AllPropertiesState,
     WatchableEventIndex,
     StateDispatch,
+    SqMessages,
 ] {
     id: "../../core/id/main.roc",
     model: "../../core/model/main.roc",
@@ -18,4 +19,5 @@ package [
     result: "./result/main.roc",
     state: "./state/main.roc",
     index: "./index/main.roc",
+    messages: "./messages/main.roc",
 }

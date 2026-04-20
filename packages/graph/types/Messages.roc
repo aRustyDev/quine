@@ -8,15 +8,17 @@ import id.QuineId
 import model.PropertyValue exposing [PropertyValue]
 import model.HalfEdge exposing [HalfEdge]
 import Ids exposing [RequestId]
+import standing_messages.SqMessages exposing [SqCommand]
 
 ## A message delivered to a node actor.
 ##
 ## LiteralCmd carries a typed command that expects a reply. SleepCheck is
 ## sent by the shard on its LRU timer to give nodes a chance to decide
-## whether to sleep.
+## whether to sleep. SqCmd delivers a standing-query lifecycle command.
 NodeMessage : [
     LiteralCmd LiteralCommand,
     SleepCheck { now : U64 },
+    SqCmd SqCommand,
 ]
 
 ## A typed command delivered to a node, always paired with a RequestId for
@@ -117,4 +119,11 @@ expect
     reply = Err("something went wrong")
     when reply is
         Err(_) -> Bool.true
+        _ -> Bool.false
+
+expect
+    msg : NodeMessage
+    msg = SqCmd(UpdateStandingQueries)
+    when msg is
+        SqCmd(UpdateStandingQueries) -> Bool.true
         _ -> Bool.false
