@@ -454,6 +454,44 @@ expect
     result = handle_sq_command(node, sq_cmd, |_| Err(NotFound))
     List.is_empty(result.effects)
 
+# Integration test: full single-node property match lifecycle
+# 1. Register SQ for property "name" with Any constraint
+# 2. Set property "name" on the node
+# 3. Verify EmitSqResult is produced with the correct query_id
+expect
+    qid = QuineId.from_bytes([0x01])
+    node0 = empty_node_state(qid)
+    query : MvStandingQuery
+    query = LocalProperty({ prop_key: "name", constraint: Any, aliased_as: Ok("n") })
+    pid = compute_part_id(query)
+    global_id = 42u128
+    lookup = |p| if p == pid then Ok(query) else Err(NotFound)
+
+    # Step 1: Create subscription
+    subscriber : SqMsgSubscriber
+    subscriber = GlobalSubscriber({ global_id })
+    create_cmd : SqCommand
+    create_cmd = CreateSqSubscription({ subscriber, query, global_id })
+    r1 = handle_sq_command(node0, create_cmd, lookup)
+
+    # Verify state was created
+    key : SqStateKey
+    key = { global_id, part_id: pid }
+    has_state = Dict.contains(r1.state.sq_states, key)
+
+    # Step 2: Set property — dispatch the event
+    pv = PropertyValue.from_value(Str("alice"))
+    events = [PropertySet({ key: "name", value: pv })]
+    r2 = dispatch_sq_events(r1.state, events, lookup)
+
+    # Step 3: Verify EmitSqResult with correct query_id
+    has_emit = List.any(r2.effects, |e|
+        when e is
+            EmitSqResult({ query_id }) -> query_id == global_id
+            _ -> Bool.false)
+
+    has_state && has_emit
+
 # Test 15: Full lifecycle - create subscription then dispatch PropertySet -> EmitSqResult
 expect
     qid = QuineId.from_bytes([0x01])
