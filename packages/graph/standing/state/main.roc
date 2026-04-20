@@ -9,6 +9,7 @@ package [
     SubscribeAcrossEdgeState,
     EdgeSubscriptionReciprocalState,
     FilterMapState,
+    StateDispatch,
 ] {
     id: "../../../core/id/main.roc",
     model: "../../../core/model/main.roc",

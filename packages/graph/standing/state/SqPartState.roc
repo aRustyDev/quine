@@ -50,9 +50,12 @@ SqPartState : [
         last_reported_properties : Result (Dict Str PropertyValue) [NeverReported],
     },
     ## SubscribeAcrossEdge: accumulates per-half-edge child results.
+    ## Keys are serialized HalfEdge strings (type:dir:hex) to avoid needing
+    ## Hash on the opaque QuineId inside HalfEdge.
     SubscribeAcrossEdgeState {
         query_part_id : StandingQueryPartId,
-        edge_results : Dict HalfEdge (Result (List QueryContext) [Pending]),
+        edge_results : Dict Str (Result (List QueryContext) [Pending]),
+        edge_map : Dict Str HalfEdge,
     },
     ## EdgeSubscriptionReciprocal: tracks whether the remote sub-query matches.
     EdgeSubscriptionReciprocalState {
@@ -184,6 +187,7 @@ create_state = |query|
             SubscribeAcrossEdgeState({
                 query_part_id: pid,
                 edge_results: Dict.empty({}),
+                edge_map: Dict.empty({}),
             })
 
         EdgeSubscriptionReciprocal({ half_edge, and_then_id }) ->
@@ -258,12 +262,12 @@ expect
             Bool.true
         _ -> Bool.false
 
-# SubscribeAcrossEdge starts with empty edge_results
+# SubscribeAcrossEdge starts with empty edge_results and edge_map
 expect
     sae = SubscribeAcrossEdge({ edge_name: Ok("KNOWS"), edge_direction: Ok(Outgoing), and_then: UnitSq })
     when create_state(sae) is
-        SubscribeAcrossEdgeState({ edge_results }) ->
-            Dict.len(edge_results) == 0
+        SubscribeAcrossEdgeState({ edge_results, edge_map }) ->
+            Dict.len(edge_results) == 0 && Dict.len(edge_map) == 0
         _ -> Bool.false
 
 # FilterMap starts with NoCachedResult
