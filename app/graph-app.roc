@@ -118,6 +118,11 @@ execute_effect! = |effect|
             # Internal bookkeeping — no host action needed
             {}
 
+        EmitSqResult({ query_id, result }) ->
+            is_pos = if result.is_positive_match then "positive" else "cancellation"
+            Effect.log!(2, "graph-app: SQ result for query $(Num.to_str(query_id)): $(is_pos)")
+            {}
+
 ## Encode a PersistCommand to bytes for the host.
 ## Format: [tag:U8] [qid_len:U16LE] [qid_bytes...] [data...]
 encode_persist_command : [PersistSnapshot { id : _, snapshot_bytes : List U8 }, LoadSnapshot { id : _ }] -> List U8
