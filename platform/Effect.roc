@@ -1,6 +1,6 @@
 ## Public effect API for apps running on the quine-graph platform.
 ## Apps import this module to call host-provided functions.
-module [send_to_shard!, current_time!, log!]
+module [send_to_shard!, persist_async!, current_time!, log!]
 
 import Host
 
@@ -13,6 +13,13 @@ send_to_shard! = |shard_id, msg|
         Ok({})
     else
         Err(ChannelFull)
+
+## Dispatch an async persistence command.
+## Returns a request ID that will arrive later as a PersistenceResult
+## message to the calling shard's handle_message!.
+persist_async! : List U8 => U64
+persist_async! = |cmd|
+    Host.persist_async!(cmd)
 
 ## Get the current wall-clock time in milliseconds since epoch.
 current_time! : {} => U64

@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use std::sync::OnceLock;
 
 use crate::channels::ChannelRegistry;
+use crate::persistence_io::{self, PersistCommand};
 
 // ============================================================
 // Memory callbacks — required by all Roc platforms.
@@ -183,6 +184,25 @@ pub fn channel_registry() -> &'static ChannelRegistry {
 }
 
 // ============================================================
+// Global persistence command sender — used by roc_fx_persist_async.
+// ============================================================
+
+static PERSIST_SENDER: OnceLock<crossbeam_channel::Sender<PersistCommand>> = OnceLock::new();
+
+/// Set the global persistence command sender. Must be called before any
+/// Roc code that uses persist_async!.
+pub fn set_persist_sender(tx: crossbeam_channel::Sender<PersistCommand>) {
+    if PERSIST_SENDER.set(tx).is_err() {
+        panic!("Persist sender already initialized");
+    }
+}
+
+/// Check if the persist sender has been initialized.
+pub fn persist_sender_ready() -> bool {
+    PERSIST_SENDER.get().is_some()
+}
+
+// ============================================================
 // Host-provided effect functions — Roc calls these via roc_fx_*.
 //
 // Calling convention (verified from Zig host and nm output):
@@ -206,6 +226,7 @@ pub fn init() {
         roc_fx_current_time as _,
         roc_fx_log as _,
         roc_fx_send_to_shard as _,
+        roc_fx_persist_async as _,
     ];
     #[allow(forgetting_references)]
     std::mem::forget(std::hint::black_box(funcs));
@@ -258,4 +279,37 @@ pub extern "C" fn roc_fx_send_to_shard(shard_id: u32, msg: &RocList<u8>) -> u8 {
     } else {
         1 // channel full
     }
+}
+
+/// Dispatch an async persistence command.
+/// Roc signature: persist_async! : List U8 => U64
+/// Returns a request ID. The persistence result will arrive later as a
+/// message on the calling shard's channel (tagged TAG_PERSIST_RESULT).
+///
+/// Uses thread-local shard ID (set by shard_worker) to route the result
+/// back to the correct shard.
+#[no_mangle]
+pub extern "C" fn roc_fx_persist_async(cmd: &RocList<u8>) -> u64 {
+    let request_id = persistence_io::next_request_id();
+    let shard_id = crate::shard_worker::current_shard_id();
+    let payload = cmd.as_slice().to_vec();
+
+    let command = PersistCommand {
+        request_id,
+        shard_id,
+        payload,
+    };
+
+    if let Some(tx) = PERSIST_SENDER.get() {
+        if tx.send(command).is_err() {
+            eprintln!(
+                "persist_async: failed to send command (pool shutdown?), shard={}",
+                shard_id
+            );
+        }
+    } else {
+        eprintln!("persist_async: persist sender not initialized");
+    }
+
+    request_id
 }
