@@ -5,6 +5,9 @@
 **Context:** Phase 3 must choose how nodes are modeled as concurrent entities.
 Four options were evaluated during brainstorming; two survived platform selection.
 
+**Related:** ADR-017 (custom platform threading model), full distribution
+analysis in `refs/analysis/threading-distribution-matrix.md`
+
 ## Options Evaluated
 
 ### Option A: Shard-Managed Event Loops (chosen)
@@ -45,9 +48,33 @@ Option A — shard-managed event loops.
 4. Head-of-line blocking is mitigable: persistence I/O is offloaded to the
    host, and computation-heavy queries (Cypher) don't arrive until Phase 5.
 
+## Head-of-Line Blocking: Distribution as Natural Mitigation
+
+The primary weakness of Option A — a slow node blocks all nodes in its shard
+— is proportional to **nodes per shard**. With true distribution, this
+weakness diminishes significantly:
+
+| Topology | Total shards | Blast radius (200K nodes) |
+|----------|-------------|--------------------------|
+| 1 host × 4 threads (Phase 3) | 4 | 25% |
+| 20 hosts × 4 threads (post-Phase 7) | 80 | **1.25%** |
+| 20 hosts × 4 procs × 4 threads | 320 | 0.3% |
+
+At 80 shards, a slow Cypher query blocks ~2,500 nodes — a rounding error
+on a 200K-node graph. Option B solves a problem that distribution already
+solves, at much higher memory cost (~25-45MB vs ~5MB at 10K nodes per host)
+and unproven Roc ABI requirements.
+
+See `refs/analysis/threading-distribution-matrix.md` for the full analysis
+across all combinations of concurrency model × distribution × process
+topology, including memory, CPU, and complexity tradeoffs.
+
 ## Conditions for Revisiting
 
 - Phase 5 profiling shows head-of-line blocking from Cypher queries degrades
-  ingest throughput unacceptably
+  ingest throughput unacceptably **at the distributed shard count** (not just
+  the 4-shard simulated configuration)
 - Roc gains proven support for N concurrent platform calls (N > 10k)
 - The custom platform evolves to support coroutine-style node suspension
+- Single-host deployment at scale (50K+ nodes, no distribution planned)
+  where 25% blast radius is unacceptable
