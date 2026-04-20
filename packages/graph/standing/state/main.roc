@@ -3,6 +3,8 @@ package [
     UnitState,
     LocalIdState,
     LocalPropertyState,
+    LabelsState,
+    AllPropertiesState,
 ] {
     id: "../../../core/id/main.roc",
     model: "../../../core/model/main.roc",
