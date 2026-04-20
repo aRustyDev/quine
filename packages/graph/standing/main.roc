@@ -1,5 +1,6 @@
 package [
     StandingQueryResult,
+    ResultDiff,
     ValueConstraint,
     MvStandingQuery,
     SqPartState,
