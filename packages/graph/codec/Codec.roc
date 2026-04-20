@@ -11,6 +11,9 @@ import model.HalfEdge exposing [HalfEdge]
 import model.EdgeDirection exposing [EdgeDirection]
 import model.QuineValue exposing [QuineValue]
 import types.Messages exposing [NodeMessage, LiteralCommand]
+import standing_messages.SqMessages exposing [SqCommand]
+import standing_state.SqPartState exposing [SqMsgSubscriber, SubscriptionResult]
+import standing_result.StandingQueryResult exposing [QueryContext]
 
 # ===== Primitive Encoders =====
 
@@ -62,6 +65,36 @@ decode_u64 = |buf, offset|
     )
     when result is
         Ok(val) -> Ok({ val, next: offset + 8 })
+        Err(e) -> Err(e)
+
+## Encode a U128 in little-endian byte order (16 bytes).
+encode_u128 : U128 -> List U8
+encode_u128 = |n|
+    List.range({ start: At(0), end: Before(16) })
+    |> List.map(
+        |i|
+            Num.int_cast(Num.shift_right_zf_by(n, Num.int_cast(i) * 8) |> Num.bitwise_and(0xFF)),
+    )
+
+## Decode a U128 from little-endian bytes at the given offset.
+decode_u128 : List U8, U64 -> Result { val : U128, next : U64 } [OutOfBounds]
+decode_u128 = |buf, offset|
+    result = List.walk_until(
+        List.range({ start: At(0u64), end: Before(16u64) }),
+        Ok(0u128),
+        |acc, i|
+            when acc is
+                Err(_) -> Break(acc)
+                Ok(so_far) ->
+                    when List.get(buf, offset + i) is
+                        Err(_) -> Break(Err(OutOfBounds))
+                        Ok(b) ->
+                            shifted : U128
+                            shifted = Num.shift_left_by(Num.int_cast(b), Num.int_cast(i) * 8)
+                            Continue(Ok(Num.bitwise_or(so_far, shifted))),
+    )
+    when result is
+        Ok(val) -> Ok({ val, next: offset + 16 })
         Err(e) -> Err(e)
 
 # ===== Length-Prefixed Encoders =====
@@ -233,6 +266,290 @@ decode_half_edge = |buf, offset|
         Err(OutOfBounds) -> Err(OutOfBounds)
         Err(BadUtf8) -> Err(BadUtf8)
 
+# ===== QuineValue Decoding (standalone) =====
+
+## Decode a QuineValue from the buffer at the given offset.
+decode_quine_value_standalone : List U8, U64 -> Result { val : QuineValue, next : U64 } [OutOfBounds, BadUtf8, InvalidTag]
+decode_quine_value_standalone = |buf, offset|
+    when List.get(buf, offset) is
+        Err(_) -> Err(OutOfBounds)
+        Ok(tag) ->
+            data_start = offset + 1
+            when tag is
+                0x01 ->
+                    when decode_str(buf, data_start) is
+                        Ok({ val: s, next }) -> Ok({ val: Str(s), next })
+                        Err(OutOfBounds) -> Err(OutOfBounds)
+                        Err(BadUtf8) -> Err(BadUtf8)
+
+                0x02 ->
+                    when decode_u64(buf, data_start) is
+                        Ok({ val: bits, next }) ->
+                            i : I64
+                            i = Num.int_cast(bits)
+                            Ok({ val: Integer(i), next })
+
+                        Err(e) -> Err(e)
+
+                0x04 -> Ok({ val: True, next: data_start })
+                0x05 -> Ok({ val: False, next: data_start })
+                0x06 -> Ok({ val: Null, next: data_start })
+                0x07 ->
+                    when decode_bytes(buf, data_start) is
+                        Ok({ val: bytes, next }) -> Ok({ val: Bytes(bytes), next })
+                        Err(e) -> Err(e)
+
+                0x08 ->
+                    when decode_bytes(buf, data_start) is
+                        Ok({ val: bytes, next }) ->
+                            Ok({ val: Id(QuineId.from_bytes(bytes)), next })
+
+                        Err(e) -> Err(e)
+
+                _ -> Err(InvalidTag)
+
+# ===== QueryContext Encoding =====
+
+## Encode a QueryContext (Dict Str QuineValue): [count:U16] [key:str value:qv]...
+encode_query_context : QueryContext -> List U8
+encode_query_context = |ctx|
+    entries = Dict.to_list(ctx)
+    count : U16
+    count = Num.int_cast(List.len(entries))
+    List.walk(
+        entries,
+        encode_u16(count),
+        |acc, (k, v)|
+            acc
+            |> List.concat(encode_str(k))
+            |> List.concat(encode_quine_value(v)),
+    )
+
+## Decode a QueryContext from the buffer at the given offset.
+decode_query_context : List U8, U64 -> Result { val : QueryContext, next : U64 } [OutOfBounds, BadUtf8, InvalidTag]
+decode_query_context = |buf, offset|
+    when decode_u16(buf, offset) is
+        Err(e) -> Err(e)
+        Ok({ val: count_u16, next: entries_start }) ->
+            count = Num.int_cast(count_u16)
+            decode_context_entries(buf, entries_start, count, Dict.empty({}))
+
+decode_context_entries : List U8, U64, U64, QueryContext -> Result { val : QueryContext, next : U64 } [OutOfBounds, BadUtf8, InvalidTag]
+decode_context_entries = |buf, offset, remaining, acc|
+    if remaining == 0 then
+        Ok({ val: acc, next: offset })
+    else
+        when decode_str(buf, offset) is
+            Err(OutOfBounds) -> Err(OutOfBounds)
+            Err(BadUtf8) -> Err(BadUtf8)
+            Ok({ val: key, next: val_offset }) ->
+                when decode_quine_value_standalone(buf, val_offset) is
+                    Err(e) -> Err(e)
+                    Ok({ val: qv, next: next_offset }) ->
+                        new_acc = Dict.insert(acc, key, qv)
+                        decode_context_entries(buf, next_offset, remaining - 1, new_acc)
+
+# ===== SqMsgSubscriber Encoding =====
+
+## Encode an SqMsgSubscriber.
+## NodeSubscriber: [0x00] [subscribing_node_bytes] [global_id:U128] [query_part_id:U64]
+## GlobalSubscriber: [0x01] [global_id:U128]
+encode_sq_subscriber : SqMsgSubscriber -> List U8
+encode_sq_subscriber = |sub|
+    when sub is
+        NodeSubscriber({ subscribing_node, global_id, query_part_id }) ->
+            [0x00]
+            |> List.concat(encode_bytes(QuineId.to_bytes(subscribing_node)))
+            |> List.concat(encode_u128(global_id))
+            |> List.concat(encode_u64(query_part_id))
+
+        GlobalSubscriber({ global_id }) ->
+            [0x01]
+            |> List.concat(encode_u128(global_id))
+
+## Decode an SqMsgSubscriber from the buffer at the given offset.
+decode_sq_subscriber : List U8, U64 -> Result { val : SqMsgSubscriber, next : U64 } [OutOfBounds, BadUtf8, InvalidTag]
+decode_sq_subscriber = |buf, offset|
+    when List.get(buf, offset) is
+        Err(_) -> Err(OutOfBounds)
+        Ok(tag) ->
+            data_start = offset + 1
+            when tag is
+                0x00 ->
+                    when decode_bytes(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: node_bytes, next: gid_start }) ->
+                            when decode_u128(buf, gid_start) is
+                                Err(e) -> Err(e)
+                                Ok({ val: global_id, next: pid_start }) ->
+                                    when decode_u64(buf, pid_start) is
+                                        Err(e) -> Err(e)
+                                        Ok({ val: query_part_id, next }) ->
+                                            Ok({
+                                                val: NodeSubscriber({
+                                                    subscribing_node: QuineId.from_bytes(node_bytes),
+                                                    global_id,
+                                                    query_part_id,
+                                                }),
+                                                next,
+                                            })
+
+                0x01 ->
+                    when decode_u128(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: global_id, next }) ->
+                            Ok({ val: GlobalSubscriber({ global_id }), next })
+
+                _ -> Err(InvalidTag)
+
+# ===== SubscriptionResult Encoding =====
+
+## Encode a SubscriptionResult.
+## [from_qid_bytes] [query_part_id:U64] [global_id:U128] [for_query_part_id:U64]
+## [result_count:U16] [contexts...]
+encode_subscription_result : SubscriptionResult -> List U8
+encode_subscription_result = |sr|
+    result_count : U16
+    result_count = Num.int_cast(List.len(sr.result_group))
+    encode_bytes(QuineId.to_bytes(sr.from))
+    |> List.concat(encode_u64(sr.query_part_id))
+    |> List.concat(encode_u128(sr.global_id))
+    |> List.concat(encode_u64(sr.for_query_part_id))
+    |> List.concat(encode_u16(result_count))
+    |> |acc| List.walk(sr.result_group, acc, |a, ctx| List.concat(a, encode_query_context(ctx)))
+
+## Decode a SubscriptionResult from the buffer at the given offset.
+decode_subscription_result : List U8, U64 -> Result { val : SubscriptionResult, next : U64 } [OutOfBounds, BadUtf8, InvalidTag]
+decode_subscription_result = |buf, offset|
+    when decode_bytes(buf, offset) is
+        Err(e) -> Err(e)
+        Ok({ val: from_bytes, next: qpid_start }) ->
+            when decode_u64(buf, qpid_start) is
+                Err(e) -> Err(e)
+                Ok({ val: query_part_id, next: gid_start }) ->
+                    when decode_u128(buf, gid_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: global_id, next: fqpid_start }) ->
+                            when decode_u64(buf, fqpid_start) is
+                                Err(e) -> Err(e)
+                                Ok({ val: for_query_part_id, next: count_start }) ->
+                                    when decode_u16(buf, count_start) is
+                                        Err(e) -> Err(e)
+                                        Ok({ val: count_u16, next: contexts_start }) ->
+                                            count = Num.int_cast(count_u16)
+                                            when decode_contexts(buf, contexts_start, count, []) is
+                                                Err(e) -> Err(e)
+                                                Ok({ val: result_group, next }) ->
+                                                    Ok({
+                                                        val: {
+                                                            from: QuineId.from_bytes(from_bytes),
+                                                            query_part_id,
+                                                            global_id,
+                                                            for_query_part_id,
+                                                            result_group,
+                                                        },
+                                                        next,
+                                                    })
+
+decode_contexts : List U8, U64, U64, List QueryContext -> Result { val : List QueryContext, next : U64 } [OutOfBounds, BadUtf8, InvalidTag]
+decode_contexts = |buf, offset, remaining, acc|
+    if remaining == 0 then
+        Ok({ val: acc, next: offset })
+    else
+        when decode_query_context(buf, offset) is
+            Err(e) -> Err(e)
+            Ok({ val: ctx, next }) ->
+                decode_contexts(buf, next, remaining - 1, List.append(acc, ctx))
+
+# ===== SqCommand Encoding =====
+
+## Tag bytes for SQ commands (0x10-0x13, no collision with existing 0x01-0x07).
+## 0x10 = CreateSqSubscription
+## 0x11 = CancelSqSubscription
+## 0x12 = NewSqResult
+## 0x13 = UpdateStandingQueries
+
+## Encode an SqCommand to a List U8.
+encode_sq_command : SqCommand -> List U8
+encode_sq_command = |cmd|
+    when cmd is
+        CreateSqSubscription({ subscriber, global_id }) ->
+            # query_part_id is NOT encoded (query AST not serialized).
+            # On decode, UnitSq is used as placeholder; actual query looked
+            # up from shard part_index at dispatch time (Phase 4d concern).
+            [0x10]
+            |> List.concat(encode_u128(global_id))
+            |> List.concat(encode_sq_subscriber(subscriber))
+
+        CancelSqSubscription({ subscriber, query_part_id, global_id }) ->
+            [0x11]
+            |> List.concat(encode_u128(global_id))
+            |> List.concat(encode_u64(query_part_id))
+            |> List.concat(encode_sq_subscriber(subscriber))
+
+        NewSqResult(sr) ->
+            [0x12]
+            |> List.concat(encode_subscription_result(sr))
+
+        UpdateStandingQueries ->
+            [0x13]
+
+## Decode an SqCommand from the buffer at the given offset.
+decode_sq_command : List U8, U64 -> Result { val : SqCommand, next : U64 } [OutOfBounds, BadUtf8, InvalidTag]
+decode_sq_command = |buf, offset|
+    when List.get(buf, offset) is
+        Err(_) -> Err(OutOfBounds)
+        Ok(tag) ->
+            data_start = offset + 1
+            when tag is
+                0x10 ->
+                    # CreateSqSubscription: decode global_id + subscriber.
+                    # query is placeholder UnitSq (looked up at dispatch time).
+                    when decode_u128(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: global_id, next: sub_start }) ->
+                            when decode_sq_subscriber(buf, sub_start) is
+                                Err(e) -> Err(e)
+                                Ok({ val: subscriber, next }) ->
+                                    Ok({
+                                        val: CreateSqSubscription({
+                                            subscriber,
+                                            query: UnitSq,
+                                            global_id,
+                                        }),
+                                        next,
+                                    })
+
+                0x11 ->
+                    when decode_u128(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: global_id, next: pid_start }) ->
+                            when decode_u64(buf, pid_start) is
+                                Err(e) -> Err(e)
+                                Ok({ val: query_part_id, next: sub_start }) ->
+                                    when decode_sq_subscriber(buf, sub_start) is
+                                        Err(e) -> Err(e)
+                                        Ok({ val: subscriber, next }) ->
+                                            Ok({
+                                                val: CancelSqSubscription({
+                                                    subscriber,
+                                                    query_part_id,
+                                                    global_id,
+                                                }),
+                                                next,
+                                            })
+
+                0x12 ->
+                    when decode_subscription_result(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: sr, next }) ->
+                            Ok({ val: NewSqResult(sr), next })
+
+                0x13 ->
+                    Ok({ val: UpdateStandingQueries, next: data_start })
+
+                _ -> Err(InvalidTag)
+
 # ===== NodeMessage Encoding =====
 
 ## Encode a NodeMessage to a List U8.
@@ -242,6 +559,7 @@ encode_node_msg = |msg|
         LiteralCmd(cmd) -> encode_literal_cmd(cmd)
         SleepCheck({ now }) ->
             List.concat([0x07], encode_u64(now))
+        SqCmd(sq_cmd) -> encode_sq_command(sq_cmd)
 
 encode_literal_cmd : LiteralCommand -> List U8
 encode_literal_cmd = |cmd|
@@ -313,6 +631,12 @@ decode_node_msg = |buf, offset|
                             Ok({ val: SleepCheck({ now }), next })
 
                         Err(e) -> Err(e)
+
+                0x10 | 0x11 | 0x12 | 0x13 ->
+                    when decode_sq_command(buf, offset) is
+                        Err(e) -> Err(e)
+                        Ok({ val: sq_cmd, next }) ->
+                            Ok({ val: SqCmd(sq_cmd), next })
 
                 _ -> Err(InvalidTag)
 
@@ -625,4 +949,165 @@ expect
     # Truncated GetProps (tag but no reply_to)
     when decode_node_msg([0x01], 0) is
         Err(OutOfBounds) -> Bool.true
+        _ -> Bool.false
+
+# ===== U128 Tests =====
+
+# -- U128 roundtrip: zero --
+expect
+    encoded = encode_u128(0u128)
+    when decode_u128(encoded, 0) is
+        Ok({ val: 0u128, next: 16 }) -> Bool.true
+        _ -> Bool.false
+
+# -- U128 roundtrip: large value --
+expect
+    encoded = encode_u128(0xDEADBEEF_CAFEBABE_12345678_9ABCDEF0)
+    when decode_u128(encoded, 0) is
+        Ok({ val, next: 16 }) -> val == 0xDEADBEEF_CAFEBABE_12345678_9ABCDEF0
+        _ -> Bool.false
+
+# -- U128 truncated --
+expect
+    when decode_u128([0x01, 0x02], 0) is
+        Err(OutOfBounds) -> Bool.true
+        _ -> Bool.false
+
+# ===== QueryContext Tests =====
+
+# -- QueryContext roundtrip: empty --
+expect
+    ctx : QueryContext
+    ctx = Dict.empty({})
+    encoded = encode_query_context(ctx)
+    when decode_query_context(encoded, 0) is
+        Ok({ val }) -> Dict.len(val) == 0
+        _ -> Bool.false
+
+# -- QueryContext roundtrip: single entry --
+expect
+    ctx : QueryContext
+    ctx = Dict.insert(Dict.empty({}), "x", Integer(42))
+    encoded = encode_query_context(ctx)
+    when decode_query_context(encoded, 0) is
+        Ok({ val }) ->
+            when Dict.get(val, "x") is
+                Ok(Integer(42)) -> Bool.true
+                _ -> Bool.false
+
+        _ -> Bool.false
+
+# ===== SqMsgSubscriber Tests =====
+
+# -- GlobalSubscriber roundtrip --
+expect
+    sub : SqMsgSubscriber
+    sub = GlobalSubscriber({ global_id: 0xABCDEF01_23456789_ABCDEF01_23456789 })
+    encoded = encode_sq_subscriber(sub)
+    when decode_sq_subscriber(encoded, 0) is
+        Ok({ val: GlobalSubscriber({ global_id }) }) ->
+            global_id == 0xABCDEF01_23456789_ABCDEF01_23456789
+
+        _ -> Bool.false
+
+# -- NodeSubscriber roundtrip --
+expect
+    sub : SqMsgSubscriber
+    sub = NodeSubscriber({
+        subscribing_node: QuineId.from_bytes([0x01, 0x02]),
+        global_id: 99u128,
+        query_part_id: 42u64,
+    })
+    encoded = encode_sq_subscriber(sub)
+    when decode_sq_subscriber(encoded, 0) is
+        Ok({ val: NodeSubscriber({ global_id, query_part_id }) }) ->
+            global_id == 99u128 and query_part_id == 42u64
+
+        _ -> Bool.false
+
+# ===== SqCommand Tests =====
+
+# -- UpdateStandingQueries roundtrip --
+expect
+    msg = SqCmd(UpdateStandingQueries)
+    encoded = encode_node_msg(msg)
+    when decode_node_msg(encoded, 0) is
+        Ok({ val: SqCmd(UpdateStandingQueries) }) -> Bool.true
+        _ -> Bool.false
+
+# -- CancelSqSubscription roundtrip --
+expect
+    sub : SqMsgSubscriber
+    sub = GlobalSubscriber({ global_id: 7u128 })
+    cmd : SqCommand
+    cmd = CancelSqSubscription({
+        subscriber: sub,
+        query_part_id: 123u64,
+        global_id: 7u128,
+    })
+    msg = SqCmd(cmd)
+    encoded = encode_node_msg(msg)
+    when decode_node_msg(encoded, 0) is
+        Ok({ val: SqCmd(CancelSqSubscription({ query_part_id, global_id })) }) ->
+            query_part_id == 123u64 and global_id == 7u128
+
+        _ -> Bool.false
+
+# -- CreateSqSubscription roundtrip (query decoded as UnitSq placeholder) --
+expect
+    sub : SqMsgSubscriber
+    sub = GlobalSubscriber({ global_id: 5u128 })
+    cmd : SqCommand
+    cmd = CreateSqSubscription({
+        subscriber: sub,
+        query: UnitSq,
+        global_id: 5u128,
+    })
+    msg = SqCmd(cmd)
+    encoded = encode_node_msg(msg)
+    when decode_node_msg(encoded, 0) is
+        Ok({ val: SqCmd(CreateSqSubscription({ global_id, query: UnitSq })) }) ->
+            global_id == 5u128
+
+        _ -> Bool.false
+
+# -- NewSqResult roundtrip with empty result group --
+expect
+    sr : SubscriptionResult
+    sr = {
+        from: QuineId.from_bytes([0xAA]),
+        query_part_id: 10u64,
+        global_id: 200u128,
+        for_query_part_id: 20u64,
+        result_group: [],
+    }
+    msg = SqCmd(NewSqResult(sr))
+    encoded = encode_node_msg(msg)
+    when decode_node_msg(encoded, 0) is
+        Ok({ val: SqCmd(NewSqResult(decoded_sr)) }) ->
+            decoded_sr.query_part_id == 10u64
+            and decoded_sr.global_id == 200u128
+            and decoded_sr.for_query_part_id == 20u64
+            and List.len(decoded_sr.result_group) == 0
+
+        _ -> Bool.false
+
+# -- NewSqResult roundtrip with one non-empty context --
+expect
+    ctx : QueryContext
+    ctx = Dict.insert(Dict.empty({}), "name", Str("Alice"))
+    sr : SubscriptionResult
+    sr = {
+        from: QuineId.from_bytes([0x01]),
+        query_part_id: 1u64,
+        global_id: 1u128,
+        for_query_part_id: 2u64,
+        result_group: [ctx],
+    }
+    msg = SqCmd(NewSqResult(sr))
+    encoded = encode_node_msg(msg)
+    when decode_node_msg(encoded, 0) is
+        Ok({ val: SqCmd(NewSqResult(decoded_sr)) }) ->
+            List.len(decoded_sr.result_group) == 1
+
         _ -> Bool.false
