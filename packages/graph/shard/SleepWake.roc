@@ -12,6 +12,7 @@ import types.Config exposing [ShardConfig]
 import types.NodeEntry exposing [NodeEntry, WakefulState, empty_node_state, compute_cost_to_sleep]
 import types.Effects exposing [Effect]
 import types.Messages exposing [NodeMessage]
+import standing_index.WatchableEventIndex
 
 ## Return true if the node should NOT be put to sleep right now.
 ##
@@ -99,6 +100,8 @@ complete_wake = |nodes, qid, maybe_snapshot, now|
                     journal: [],
                     snapshot_base: Some(snap),
                     edge_storage: Inline,
+                    sq_states: Dict.empty({}),
+                    watchable_event_index: WatchableEventIndex.empty,
                 }
     cost = compute_cost_to_sleep(state)
     new_entry = Awake({

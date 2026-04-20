@@ -2,6 +2,8 @@ module [
     NodeEntry,
     WakefulState,
     NodeState,
+    SqStateKey,
+    SqNodeState,
     empty_node_state,
     compute_cost_to_sleep,
 ]
@@ -12,6 +14,9 @@ import model.HalfEdge exposing [HalfEdge]
 import model.NodeEvent exposing [TimestampedEvent]
 import model.NodeSnapshot exposing [NodeSnapshot]
 import Messages exposing [NodeMessage]
+import standing_index.WatchableEventIndex exposing [WatchableEventIndex]
+import standing_state.SqPartState exposing [SqPartState, SqSubscription]
+import standing_result.StandingQueryResult exposing [StandingQueryId, StandingQueryPartId]
 
 ## The in-memory lifecycle state of a node slot in a shard.
 ##
@@ -38,6 +43,24 @@ WakefulState : [
     ConsideringSleep { deadline : U64 },
 ]
 
+## Uniquely identifies one standing query part's state on a given node.
+##
+## Combines the top-level standing query ID with the specific part ID so that
+## multiple parts of the same standing query can each have independent state.
+SqStateKey : {
+    global_id : StandingQueryId,
+    part_id : StandingQueryPartId,
+}
+
+## Per-node per-part standing query state.
+##
+## Holds both the subscription record (who is subscribed to this part's output)
+## and the evaluator state (what the part has seen so far).
+SqNodeState : {
+    subscription : SqSubscription,
+    state : SqPartState,
+}
+
 ## A node's live in-memory state held by an awake shard entry.
 ##
 ## This is the graph-layer view of node data. It extends the core model's
@@ -47,6 +70,10 @@ WakefulState : [
 ##
 ## edges is keyed by edge_type for efficient per-type lookup; the List of
 ## HalfEdge per key holds all edges of that type (across all directions).
+##
+## sq_states holds per-part standing query evaluation state, keyed by
+## (global_id, part_id). watchable_event_index provides O(1) lookup of
+## which SQ parts to notify when this node's properties or edges change.
 NodeState : {
     id : QuineId,
     properties : Dict Str PropertyValue,
@@ -54,6 +81,8 @@ NodeState : {
     journal : List TimestampedEvent,
     snapshot_base : [None, Some NodeSnapshot],
     edge_storage : [Inline],
+    sq_states : Dict SqStateKey SqNodeState,
+    watchable_event_index : WatchableEventIndex,
 }
 
 ## Create a fresh, empty NodeState for the given node id.
@@ -66,6 +95,8 @@ empty_node_state = |qid|
         journal: [],
         snapshot_base: None,
         edge_storage: Inline,
+        sq_states: Dict.empty({}),
+        watchable_event_index: WatchableEventIndex.empty,
     }
 
 ## Approximate log base-2 of n (integer, floor).

@@ -8,6 +8,7 @@ import model.HalfEdge
 import types.NodeEntry exposing [NodeState]
 import types.Messages exposing [NodeMessage, LiteralCommand]
 import types.Effects exposing [Effect]
+import standing_index.WatchableEventIndex
 
 ## Dispatch a message to the given node state, returning an updated state and
 ## a list of side-effects the shard should execute.
@@ -85,6 +86,8 @@ expect
         journal: [],
         snapshot_base: None,
         edge_storage: Inline,
+        sq_states: Dict.empty({}),
+        watchable_event_index: WatchableEventIndex.empty,
     }
     result = dispatch_node_msg(node, LiteralCmd(GetProps({ reply_to: 1 })))
     when List.first(result.effects) is
@@ -101,6 +104,8 @@ expect
         journal: [],
         snapshot_base: None,
         edge_storage: Inline,
+        sq_states: Dict.empty({}),
+        watchable_event_index: WatchableEventIndex.empty,
     }
     pv = PropertyValue.from_value(Str("alice"))
     result = dispatch_node_msg(node, LiteralCmd(SetProp({ key: "name", value: pv, reply_to: 1 })))
@@ -116,6 +121,8 @@ expect
         journal: [],
         snapshot_base: None,
         edge_storage: Inline,
+        sq_states: Dict.empty({}),
+        watchable_event_index: WatchableEventIndex.empty,
     }
     pv = PropertyValue.from_value(Str("alice"))
     after_set = dispatch_node_msg(node, LiteralCmd(SetProp({ key: "name", value: pv, reply_to: 1 })))
@@ -135,6 +142,8 @@ expect
         journal: [],
         snapshot_base: None,
         edge_storage: Inline,
+        sq_states: Dict.empty({}),
+        watchable_event_index: WatchableEventIndex.empty,
     }
     result = dispatch_node_msg(node, LiteralCmd(RemoveProp({ key: "name", reply_to: 1 })))
     Dict.is_empty(result.state.properties)
@@ -150,6 +159,8 @@ expect
         journal: [],
         snapshot_base: None,
         edge_storage: Inline,
+        sq_states: Dict.empty({}),
+        watchable_event_index: WatchableEventIndex.empty,
     }
     edge = { edge_type: "KNOWS", direction: Outgoing, other: qid_b }
     result = dispatch_node_msg(node, LiteralCmd(AddEdge({ edge, reply_to: 1 })))
@@ -180,6 +191,8 @@ expect
         journal: [],
         snapshot_base: None,
         edge_storage: Inline,
+        sq_states: Dict.empty({}),
+        watchable_event_index: WatchableEventIndex.empty,
     }
     result = dispatch_node_msg(node, LiteralCmd(GetEdges({ reply_to: 1 })))
     when List.first(result.effects) is
