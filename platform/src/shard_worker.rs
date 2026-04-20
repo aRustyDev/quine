@@ -48,14 +48,8 @@ pub fn run_shard_worker(shard_id: u32, rx: Receiver<ShardMsg>) {
                         let timer_kind = msg.get(1).copied().unwrap_or(0);
                         state = roc_glue::call_on_timer(state, timer_kind);
                     }
-                    TAG_PERSIST_RESULT => {
-                        // Pass the payload (without tag) to handle_message.
-                        // The Roc side receives the raw persistence result bytes.
-                        state = roc_glue::call_handle_message(state, &msg[1..]);
-                    }
-                    TAG_SHARD_MSG => {
-                        // Strip the tag byte, pass payload to handle_message
-                        state = roc_glue::call_handle_message(state, &msg[1..]);
+                    TAG_SHARD_MSG | TAG_PERSIST_RESULT => {
+                        state = roc_glue::call_handle_message(state, &msg);
                     }
                     _ => {
                         // Unknown tag — log and skip
