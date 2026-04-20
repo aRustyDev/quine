@@ -14,7 +14,7 @@ use config::PlatformConfig;
 fn main() {
     roc_glue::init();
 
-    let config = PlatformConfig::default();
+    let config = parse_config();
     let registry = ChannelRegistry::new(config.shard_count, config.channel_capacity);
 
     eprintln!(
@@ -102,4 +102,35 @@ fn main() {
     for handle in handles {
         handle.join().expect("shard worker panicked");
     }
+}
+
+fn parse_config() -> PlatformConfig {
+    let mut config = PlatformConfig::default();
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--shards" => {
+                i += 1;
+                if let Some(n) = args.get(i) {
+                    config.shard_count = n.parse().expect("--shards must be a number");
+                }
+            }
+            "--channel-capacity" => {
+                i += 1;
+                if let Some(n) = args.get(i) {
+                    config.channel_capacity = n.parse().expect("--channel-capacity must be a number");
+                }
+            }
+            "--timer-interval" => {
+                i += 1;
+                if let Some(n) = args.get(i) {
+                    config.lru_check_interval_ms = n.parse().expect("--timer-interval must be a number");
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    config
 }
