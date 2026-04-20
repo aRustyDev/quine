@@ -7,6 +7,7 @@ module [
 import id.QuineId exposing [QuineId]
 import Ids exposing [RequestId, ShardId]
 import Messages exposing [NodeMessage, ReplyPayload]
+import standing_result.StandingQueryResult exposing [StandingQueryId, StandingQueryResult]
 
 ## A side-effect produced by node logic.
 ##
@@ -30,6 +31,8 @@ Effect : [
     EmitBackpressure BackpressureSignal,
     ## Notify the shard that this node's sleep cost has changed.
     UpdateCostToSleep I64,
+    ## Emit a standing query result to be sent to consumers.
+    EmitSqResult { query_id : StandingQueryId, result : StandingQueryResult },
 ]
 
 ## A durable persistence operation requested by a node.
@@ -117,4 +120,13 @@ expect
     effect = UpdateCostToSleep(5)
     when effect is
         UpdateCostToSleep(5) -> Bool.true
+        _ -> Bool.false
+
+expect
+    result : StandingQueryResult
+    result = { is_positive_match: Bool.true, data: Dict.empty({}) }
+    effect : Effect
+    effect = EmitSqResult({ query_id: 1u128, result })
+    when effect is
+        EmitSqResult({ query_id: 1u128 }) -> Bool.true
         _ -> Bool.false
