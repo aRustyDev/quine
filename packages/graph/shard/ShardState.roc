@@ -4,6 +4,7 @@ module [
     handle_message,
     on_timer,
     pending_effects,
+    clear_effects,
     node_entry,
     with_awake_node,
     with_lru_entry,
@@ -12,7 +13,7 @@ module [
 import id.QuineId exposing [QuineId]
 import types.Ids exposing [ShardId, NamespaceId]
 import types.Config exposing [ShardConfig, default_config]
-import types.NodeEntry exposing [NodeEntry, compute_cost_to_sleep]
+import types.NodeEntry exposing [NodeEntry, compute_cost_to_sleep, empty_node_state]
 import types.Messages exposing [NodeMessage]
 import types.Effects exposing [Effect, BackpressureSignal]
 import Lru exposing [LruEntry]
@@ -132,6 +133,14 @@ on_timer = |@ShardState(s), now|
 pending_effects : ShardState -> List Effect
 pending_effects = |@ShardState(s)| s.pending_effects
 
+## Reset the pending effects list to empty.
+##
+## Called by the app after draining and executing all effects, so they
+## are not executed again on the next dispatch.
+clear_effects : ShardState -> ShardState
+clear_effects = |@ShardState(s)|
+    @ShardState({ s & pending_effects: [] })
+
 ## Return the NodeEntry for a given QuineId, if present (for testing).
 node_entry : ShardState, QuineId -> Result NodeEntry [KeyNotFound]
 node_entry = |@ShardState(s), qid| Dict.get(s.nodes, qid)
@@ -177,3 +186,26 @@ expect
     result = on_timer(shard, 1000)
     when result is
         @ShardState(s) -> List.is_empty(s.pending_effects)
+
+expect
+    # clear_effects empties the pending_effects list
+    shard = new(0, 4, default_config)
+    qid = QuineId.from_bytes([0x01])
+    ns = empty_node_state(qid)
+    awake_entry : NodeEntry
+    awake_entry = Awake({
+        state: ns,
+        wakeful: Awake,
+        cost_to_sleep: 0,
+        last_write: 100,
+        last_access: 100,
+    })
+    shard_with_node = with_awake_node(shard, qid, awake_entry)
+    msg = LiteralCmd(GetProps({ reply_to: 1 }))
+    after_msg = handle_message(shard_with_node, qid, msg, 200)
+    # Should have effects
+    has_effects = !(List.is_empty(pending_effects(after_msg)))
+    # After clear, should have none
+    cleared = clear_effects(after_msg)
+    no_effects = List.is_empty(pending_effects(cleared))
+    has_effects and no_effects
