@@ -7,6 +7,7 @@ package [
     AllPropertiesState,
     CrossState,
     SubscribeAcrossEdgeState,
+    EdgeSubscriptionReciprocalState,
 ] {
     id: "../../../core/id/main.roc",
     model: "../../../core/model/main.roc",
