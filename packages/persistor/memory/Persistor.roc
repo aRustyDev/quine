@@ -436,7 +436,7 @@ expect
     qid = QuineId.from_bytes([0x01])
     t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
     snap : NodeSnapshot
-    snap = { properties: Dict.empty({}), edges: [], time: t }
+    snap = { properties: Dict.empty({}), edges: [], time: t, sq_snapshot: [] }
     when put_snapshot(p, qid, snap) is
         Ok(@Persistor(state)) ->
             when Dict.get(state.snapshots, qid) is
@@ -450,10 +450,10 @@ expect
     qid = QuineId.from_bytes([0x01])
     t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
     snap1 : NodeSnapshot
-    snap1 = { properties: Dict.empty({}), edges: [], time: t }
+    snap1 = { properties: Dict.empty({}), edges: [], time: t, sq_snapshot: [] }
     props = Dict.empty({}) |> Dict.insert("k", PropertyValue.from_value(Integer(1)))
     snap2 : NodeSnapshot
-    snap2 = { properties: props, edges: [], time: t }
+    snap2 = { properties: props, edges: [], time: t, sq_snapshot: [] }
     when put_snapshot(p, qid, snap1) is
         Ok(p1) ->
             when put_snapshot(p1, qid, snap2) is
@@ -484,11 +484,11 @@ expect
     t2 = EventTime.from_parts({ millis: 200, message_seq: 0, event_seq: 0 })
     t3 = EventTime.from_parts({ millis: 300, message_seq: 0, event_seq: 0 })
     snap1 : NodeSnapshot
-    snap1 = { properties: Dict.empty({}), edges: [], time: t1 }
+    snap1 = { properties: Dict.empty({}), edges: [], time: t1, sq_snapshot: [] }
     snap2 : NodeSnapshot
-    snap2 = { properties: Dict.empty({}), edges: [], time: t2 }
+    snap2 = { properties: Dict.empty({}), edges: [], time: t2, sq_snapshot: [] }
     snap3 : NodeSnapshot
-    snap3 = { properties: Dict.empty({}), edges: [], time: t3 }
+    snap3 = { properties: Dict.empty({}), edges: [], time: t3, sq_snapshot: [] }
     when put_snapshot(p, qid, snap1) is
         Ok(p1) ->
             when put_snapshot(p1, qid, snap2) is
@@ -510,7 +510,7 @@ expect
     qid = QuineId.from_bytes([0x01])
     t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
     snap : NodeSnapshot
-    snap = { properties: Dict.empty({}), edges: [], time: t }
+    snap = { properties: Dict.empty({}), edges: [], time: t, sq_snapshot: [] }
     when put_snapshot(p, qid, snap) is
         Ok(p1) ->
             when delete_snapshots_for_node(p1, qid) is

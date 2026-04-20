@@ -47,7 +47,7 @@ expect
     t1 = EventTime.from_parts({ millis: 1000, message_seq: 0, event_seq: 0 })
     props_at_t1 = Dict.empty({}) |> Dict.insert("name", PropertyValue.from_value(Str("Alice")))
     snap : NodeSnapshot
-    snap = { properties: props_at_t1, edges: [], time: t1 }
+    snap = { properties: props_at_t1, edges: [], time: t1, sq_snapshot: [] }
 
     when Persistor.put_snapshot(p, qid, snap) is
         Err(_) -> Bool.false
@@ -84,7 +84,7 @@ expect
     # Add a snapshot and an event
     t = EventTime.from_parts({ millis: 100, message_seq: 0, event_seq: 0 })
     snap : NodeSnapshot
-    snap = { properties: Dict.empty({}), edges: [], time: t }
+    snap = { properties: Dict.empty({}), edges: [], time: t, sq_snapshot: [] }
     e = { event: PropertySet({ key: "k", value: PropertyValue.from_value(Integer(1)) }), at_time: t }
 
     when Persistor.put_snapshot(p, qid, snap) is

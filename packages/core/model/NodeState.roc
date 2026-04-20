@@ -64,7 +64,7 @@ from_snapshot = |snap|
 ## Capture a NodeState as a NodeSnapshot at the given time.
 to_snapshot : NodeState, EventTime -> NodeSnapshot
 to_snapshot = |state, time|
-    { properties: state.properties, edges: state.edges, time: time }
+    { properties: state.properties, edges: state.edges, time: time, sq_snapshot: [] }
 
 # ===== Tests =====
 
