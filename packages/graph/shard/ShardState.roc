@@ -1,5 +1,6 @@
 module [
     ShardState,
+    RunningQuery,
     new,
     handle_message,
     on_timer,
@@ -8,17 +9,33 @@ module [
     node_entry,
     with_awake_node,
     with_lru_entry,
+    register_standing_query,
+    lookup_query,
+    cancel_standing_query,
+    buffer_sq_result,
 ]
 
 import id.QuineId exposing [QuineId]
 import types.Ids exposing [ShardId, NamespaceId]
-import types.Config exposing [ShardConfig, default_config]
+import types.Config exposing [ShardConfig, SqConfig, default_config, default_sq_config]
 import types.NodeEntry exposing [NodeEntry, compute_cost_to_sleep, empty_node_state]
 import types.Messages exposing [NodeMessage]
 import types.Effects exposing [Effect, BackpressureSignal]
 import Lru exposing [LruEntry]
 import Dispatch
 import SleepWake
+import standing_ast.MvStandingQuery exposing [MvStandingQuery]
+import standing_result.StandingQueryResult exposing [StandingQueryId, StandingQueryPartId, StandingQueryResult]
+
+## A standing query registered with this shard.
+##
+## Tracks the top-level query AST, whether cancellations should be forwarded,
+## and the unique identifier used to address results back to subscribers.
+RunningQuery : {
+    id : StandingQueryId,
+    query : MvStandingQuery,
+    include_cancellations : Bool,
+}
 
 ## Top-level in-memory state for one shard actor.
 ##
@@ -36,6 +53,10 @@ ShardState := {
     pending_effects : List Effect,
     request_counter : U64,
     backpressure : BackpressureSignal,
+    part_index : Dict StandingQueryPartId MvStandingQuery,
+    running_queries : Dict StandingQueryId RunningQuery,
+    sq_result_buffer : List StandingQueryResult,
+    sq_config : SqConfig,
 }
 
 ## Create a new, empty shard state.
@@ -54,6 +75,10 @@ new = |shard_id, shard_count, config|
         pending_effects: [],
         request_counter: 0,
         backpressure: Clear,
+        part_index: Dict.empty({}),
+        running_queries: Dict.empty({}),
+        sq_result_buffer: [],
+        sq_config: default_sq_config,
     })
 
 ## Dispatch a message to a node, updating shard state accordingly.
@@ -65,9 +90,10 @@ new = |shard_id, shard_count, config|
 ##     Waking entry with the message already queued.
 handle_message : ShardState, QuineId, NodeMessage, U64 -> ShardState
 handle_message = |@ShardState(s), target, msg, now|
+    lookup_fn = |pid| Dict.get(s.part_index, pid) |> Result.map_err(|_| NotFound)
     when Dict.get(s.nodes, target) is
         Ok(Awake({ state, wakeful, cost_to_sleep: _, last_write, last_access: _ })) ->
-            result = Dispatch.dispatch_node_msg(state, msg)
+            result = Dispatch.dispatch_node_msg(state, msg, lookup_fn)
             new_cost = compute_cost_to_sleep(result.state)
             new_entry = Awake({
                 state: result.state,
@@ -160,6 +186,76 @@ with_lru_entry : ShardState, QuineId, U64, I64 -> ShardState
 with_lru_entry = |@ShardState(s), qid, ts, cost|
     @ShardState({ s & lru_entries: Lru.touch(s.lru_entries, qid, ts, cost) })
 
+## Register a standing query with this shard.
+##
+## Stores a RunningQuery entry in `running_queries` and adds all
+## globally-indexable sub-queries to `part_index` (keyed by part ID).
+## Registering the same ID twice overwrites the previous registration.
+register_standing_query : ShardState, StandingQueryId, MvStandingQuery, Bool -> ShardState
+register_standing_query = |@ShardState(s), sq_id, query, include_cancellations|
+    running = { id: sq_id, query, include_cancellations }
+    new_running = Dict.insert(s.running_queries, sq_id, running)
+    subqueries = MvStandingQuery.indexable_subqueries(query)
+    new_part_index = List.walk(
+        subqueries,
+        s.part_index,
+        |idx, sub|
+            pid = MvStandingQuery.query_part_id(sub)
+            Dict.insert(idx, pid, sub),
+    )
+    @ShardState({ s &
+        running_queries: new_running,
+        part_index: new_part_index,
+    })
+
+## Look up an indexable sub-query by its part ID.
+##
+## Returns Ok(query) if the part ID is registered, or Err(NotFound) otherwise.
+lookup_query : ShardState, StandingQueryPartId -> Result MvStandingQuery [NotFound]
+lookup_query = |@ShardState(s), part_id|
+    Dict.get(s.part_index, part_id)
+    |> Result.map_err(|_| NotFound)
+
+## Cancel a standing query, removing it and all its parts from the indexes.
+##
+## Removes the query from `running_queries`, then rebuilds `part_index`
+## from the remaining queries so that orphaned part IDs are cleaned up.
+cancel_standing_query : ShardState, StandingQueryId -> ShardState
+cancel_standing_query = |@ShardState(s), sq_id|
+    new_running = Dict.remove(s.running_queries, sq_id)
+    new_part_index = Dict.walk(
+        new_running,
+        Dict.empty({}),
+        |idx, _, rq|
+            subqueries = MvStandingQuery.indexable_subqueries(rq.query)
+            List.walk(
+                subqueries,
+                idx,
+                |inner_idx, sub|
+                    pid = MvStandingQuery.query_part_id(sub)
+                    Dict.insert(inner_idx, pid, sub),
+            ),
+    )
+    @ShardState({ s &
+        running_queries: new_running,
+        part_index: new_part_index,
+    })
+
+## Append a standing query result to the shard's result buffer.
+##
+## If the buffer length after appending meets or exceeds the configured
+## `result_buffer_size`, returns Ok(EmitBackpressure(SqBufferFull)) as the
+## effect.  Otherwise returns Err(NoEffect).
+buffer_sq_result : ShardState, StandingQueryResult -> { state : ShardState, effect : Result Effect [NoEffect] }
+buffer_sq_result = |@ShardState(s), result|
+    new_buffer = List.append(s.sq_result_buffer, result)
+    buffer_len = List.len(new_buffer) |> Num.to_u32
+    new_state = @ShardState({ s & sq_result_buffer: new_buffer })
+    if buffer_len >= s.sq_config.result_buffer_size then
+        { state: new_state, effect: Ok(EmitBackpressure(SqBufferFull)) }
+    else
+        { state: new_state, effect: Err(NoEffect) }
+
 # ===== Tests =====
 
 expect
@@ -209,3 +305,53 @@ expect
     cleared = clear_effects(after_msg)
     no_effects = List.is_empty(pending_effects(cleared))
     has_effects and no_effects
+
+expect
+    # register_standing_query adds the query to part_index so lookup succeeds
+    shard = new(0, 4, default_config)
+    query : MvStandingQuery
+    query = LocalProperty({ prop_key: "name", constraint: Any, aliased_as: Ok("n") })
+    pid = MvStandingQuery.query_part_id(query)
+    shard2 = register_standing_query(shard, 1u128, query, Bool.true)
+    when lookup_query(shard2, pid) is
+        Ok(_) -> Bool.true
+        Err(_) -> Bool.false
+
+expect
+    # cancel_standing_query removes the query from part_index so lookup fails
+    shard = new(0, 4, default_config)
+    query : MvStandingQuery
+    query = LocalProperty({ prop_key: "name", constraint: Any, aliased_as: Ok("n") })
+    pid = MvStandingQuery.query_part_id(query)
+    shard2 = register_standing_query(shard, 1u128, query, Bool.true)
+    shard3 = cancel_standing_query(shard2, 1u128)
+    when lookup_query(shard3, pid) is
+        Ok(_) -> Bool.false
+        Err(_) -> Bool.true
+
+expect
+    # buffer_sq_result returns NoEffect when below result_buffer_size
+    shard = new(0, 4, default_config)
+    result : StandingQueryResult
+    result = { is_positive_match: Bool.true, data: Dict.empty({}) }
+    out = buffer_sq_result(shard, result)
+    when out.effect is
+        Err(NoEffect) -> Bool.true
+        _ -> Bool.false
+
+expect
+    # buffer_sq_result returns EmitBackpressure(SqBufferFull) when buffer fills
+    # Use a config with result_buffer_size = 1 so a single item triggers it
+    tiny_config : SqConfig
+    tiny_config = { result_buffer_size: 1u32, backpressure_threshold: 1u32, include_cancellations: Bool.false }
+    base = new(0, 4, default_config)
+    # Patch sq_config directly via opaque unwrap (allowed within the same module)
+    shard =
+        when base is
+            @ShardState(s) -> @ShardState({ s & sq_config: tiny_config })
+    result : StandingQueryResult
+    result = { is_positive_match: Bool.true, data: Dict.empty({}) }
+    out = buffer_sq_result(shard, result)
+    when out.effect is
+        Ok(EmitBackpressure(SqBufferFull)) -> Bool.true
+        _ -> Bool.false
