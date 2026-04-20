@@ -11,5 +11,8 @@ fn main() {
         "cargo:rustc-link-search=native={}",
         platform_path.display()
     );
-    println!("cargo:rustc-link-lib=static=app");
+    // Force static linking even if libapp.dylib exists alongside libapp.a.
+    // Without +whole-archive, Cargo may prefer the .dylib, causing runtime
+    // dyld errors when the binary is run from another directory.
+    println!("cargo:rustc-link-lib=static:+whole-archive=app");
 }

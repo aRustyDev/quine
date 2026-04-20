@@ -106,23 +106,19 @@ extern "C" {
 // Refcount pinning — kingfisher/basic-webserver pattern.
 //
 // Roc uses reference counting for heap values. RocBox stores the
-// refcount at (data_ptr - sizeof(usize)). Setting refcount to 0
-// means "constant / host-owned — don't touch the refcount."
+// refcount at (data_ptr - alloc_alignment). Setting refcount to 0
+// (Storage::Readonly) means "host-owned — don't touch the refcount."
 // This prevents Roc from freeing state between host calls.
 //
-// From basic-webserver roc.rs:
-//   let data_ptr: *mut usize = std::mem::transmute(model);
-//   let rc_ptr = data_ptr.offset(-1);
-//   *rc_ptr = 0;  // pin to constant
+// We use RocBox::as_refcount_ptr() which computes the correct offset
+// via alloc_alignment, rather than raw pointer arithmetic.
 // ============================================================
 
-/// Pin the refcount of a RocBox to constant (0), preventing Roc GC.
+/// Pin the refcount of a RocBox to Readonly (0), preventing Roc GC.
+/// Callers must ensure the RocBox remains valid for the host's lifetime.
 unsafe fn pin_refcount(boxed: &RocBox<()>) {
-    let data_ptr: *mut usize = std::mem::transmute_copy(boxed);
-    if !data_ptr.is_null() {
-        let rc_ptr = data_ptr.offset(-1);
-        *rc_ptr = 0;
-    }
+    let rc_ptr = boxed.as_refcount_ptr() as *mut usize;
+    *rc_ptr = 0;
 }
 
 // ============================================================
