@@ -87,3 +87,10 @@ node_modules/
 # Beads / Dolt files (added by bd init)
 .dolt/
 .beads-credential-key
+
+# Roc platform build artifacts
+platform/libapp.a
+platform/libapp.dylib
+platform/libapp.so
+platform/app.o
+platform/target/
