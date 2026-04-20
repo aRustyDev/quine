@@ -2,6 +2,9 @@
 
 use roc_std::{RocBox, RocList, RocStr};
 use std::ffi::c_void;
+use std::sync::OnceLock;
+
+use crate::channels::ChannelRegistry;
 
 // ============================================================
 // Memory callbacks — required by all Roc platforms.
@@ -154,5 +157,105 @@ pub fn call_on_timer(state: RocBox<()>, timer_kind: u8) -> RocBox<()> {
         let output = output.assume_init();
         pin_refcount(&output);
         output
+    }
+}
+
+// ============================================================
+// Global channel registry — used by roc_fx_send_to_shard.
+// ============================================================
+
+/// Global channel registry, set once at startup.
+static CHANNEL_REGISTRY: OnceLock<ChannelRegistry> = OnceLock::new();
+
+/// Initialize the global channel registry. Must be called before any Roc code
+/// that uses send_to_shard!.
+pub fn set_channel_registry(registry: ChannelRegistry) {
+    if CHANNEL_REGISTRY.set(registry).is_err() {
+        panic!("Channel registry already initialized");
+    }
+}
+
+/// Get a reference to the global channel registry.
+pub fn channel_registry() -> &'static ChannelRegistry {
+    CHANNEL_REGISTRY
+        .get()
+        .expect("Channel registry not initialized")
+}
+
+// ============================================================
+// Host-provided effect functions — Roc calls these via roc_fx_*.
+//
+// Calling convention (verified from Zig host and nm output):
+//   - Str args are passed as &RocStr (pointer to RocStr struct)
+//   - List U8 args are passed as &RocList<u8> (pointer to RocList struct)
+//   - Scalar args (U8, U32, U64) are passed directly by value
+//   - Scalar returns (U8, U64) are returned directly
+//   - {} return is void (no return value)
+// ============================================================
+
+/// Must be called before any Roc code executes.
+/// Prevents the compiler from optimizing away effect function pointers.
+pub fn init() {
+    let funcs: &[*const extern "C" fn()] = &[
+        roc_alloc as _,
+        roc_realloc as _,
+        roc_dealloc as _,
+        roc_panic as _,
+        roc_dbg as _,
+        roc_memset as _,
+        roc_fx_current_time as _,
+        roc_fx_log as _,
+        roc_fx_send_to_shard as _,
+    ];
+    #[allow(forgetting_references)]
+    std::mem::forget(std::hint::black_box(funcs));
+}
+
+/// Get the current wall-clock time in milliseconds since epoch.
+/// Roc signature: current_time! : {} => U64
+#[no_mangle]
+pub extern "C" fn roc_fx_current_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+/// Emit a structured log message.
+/// Roc signature: log! : U8, Str => {}
+/// Roc passes Str as &RocStr (verified from test-platform-effects-zig pattern).
+#[no_mangle]
+pub extern "C" fn roc_fx_log(level: u8, msg: &RocStr) {
+    let level_str = match level {
+        0 => "ERROR",
+        1 => "WARN",
+        2 => "INFO",
+        3 => "DEBUG",
+        _ => "TRACE",
+    };
+    eprintln!("[{}] {}", level_str, msg.as_str());
+}
+
+/// Send a message to a shard's input channel.
+/// Roc signature: send_to_shard! : U32, List U8 => U8
+/// Returns 0 on success, 1 if the channel is full.
+/// Roc passes List U8 as &RocList<u8> (verified from Zig host pattern).
+#[no_mangle]
+pub extern "C" fn roc_fx_send_to_shard(shard_id: u32, msg: &RocList<u8>) -> u8 {
+    let registry = CHANNEL_REGISTRY
+        .get()
+        .expect("Channel registry not initialized");
+
+    let msg_bytes = msg.as_slice();
+
+    // Prepend TAG_SHARD_MSG so the worker loop knows this is a regular message
+    let mut tagged_msg = Vec::with_capacity(1 + msg_bytes.len());
+    tagged_msg.push(crate::channels::TAG_SHARD_MSG);
+    tagged_msg.extend_from_slice(msg_bytes);
+
+    if registry.try_send(shard_id, tagged_msg) {
+        0 // success
+    } else {
+        1 // channel full
     }
 }

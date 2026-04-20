@@ -4,7 +4,7 @@ platform "quine-graph"
         handle_message! : ShardState, List U8 => ShardState,
         on_timer! : ShardState, U8 => ShardState,
     }
-    exposes []
+    exposes [Effect]
     packages {}
     imports []
     provides [init_shard_for_host!, handle_message_for_host!, on_timer_for_host!]

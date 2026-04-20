@@ -15,4 +15,11 @@ fn main() {
     // Without +whole-archive, Cargo may prefer the .dylib, causing runtime
     // dyld errors when the binary is run from another directory.
     println!("cargo:rustc-link-lib=static:+whole-archive=app");
+
+    // Re-run build script when libapp.a changes, so cargo rebuild picks up
+    // new Roc code without needing `cargo clean`.
+    println!(
+        "cargo:rerun-if-changed={}/libapp.a",
+        platform_path.display()
+    );
 }
