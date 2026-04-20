@@ -1,6 +1,8 @@
 module [
     ShardConfig,
     default_config,
+    SqConfig,
+    default_sq_config,
 ]
 
 ## Tuning knobs for a shard actor.
@@ -46,6 +48,24 @@ default_config = {
     decline_sleep_when_access_within_ms: 0,
     sleep_deadline_ms: 3_000,
     max_edges_warning_threshold: 100_000,
+}
+
+## Standing query configuration.
+SqConfig : {
+    ## Maximum number of buffered SQ results before backpressure is emitted.
+    result_buffer_size : U32,
+    ## Buffer fill level at which backpressure is emitted (typically 75%).
+    backpressure_threshold : U32,
+    ## Whether to emit cancellation results when a match no longer holds.
+    include_cancellations : Bool,
+}
+
+## Default standing query configuration.
+default_sq_config : SqConfig
+default_sq_config = {
+    result_buffer_size: 1024,
+    backpressure_threshold: 768,
+    include_cancellations: Bool.true,
 }
 
 # ===== Tests =====
