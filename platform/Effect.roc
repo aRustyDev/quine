@@ -1,6 +1,6 @@
 ## Public effect API for apps running on the quine-graph platform.
 ## Apps import this module to call host-provided functions.
-module [send_to_shard!, persist_async!, current_time!, log!]
+module [send_to_shard!, persist_async!, current_time!, log!, emit_sq_result!]
 
 import Host
 
@@ -31,3 +31,13 @@ current_time! = |{}|
 log! : U8, Str => {}
 log! = |level, msg|
     Host.log!(level, msg)
+
+## Emit a standing query result to the host.
+## Returns Err SqBufferFull if the host's result buffer is at capacity.
+emit_sq_result! : List U8 => Result {} [SqBufferFull]
+emit_sq_result! = |payload|
+    result = Host.emit_sq_result!(payload)
+    if result == 0 then
+        Ok({})
+    else
+        Err(SqBufferFull)
