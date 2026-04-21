@@ -5,13 +5,17 @@ module [
     decode_shard_envelope,
     encode_u32,
     decode_u32,
+    encode_node_snapshot,
+    decode_node_snapshot,
 ]
 
 import id.QuineId exposing [QuineId]
+import id.EventTime exposing [EventTime]
 import model.PropertyValue exposing [PropertyValue]
 import model.HalfEdge exposing [HalfEdge]
 import model.EdgeDirection exposing [EdgeDirection]
 import model.QuineValue exposing [QuineValue]
+import model.NodeSnapshot exposing [NodeSnapshot, SqStateSnapshot]
 import types.Messages exposing [NodeMessage, LiteralCommand]
 import standing_messages.SqMessages exposing [SqCommand]
 import standing_state.SqPartState exposing [SqMsgSubscriber, SubscriptionResult]
@@ -745,6 +749,147 @@ decode_shard_envelope = |buf, offset|
                 Err(InvalidTag) -> Err(InvalidTag)
                 Err(InvalidDirection) -> Err(InvalidDirection)
 
+# ===== NodeSnapshot Encoding =====
+
+## Encode a NodeSnapshot to bytes.
+## Format: [props...][edges...][time...][sq_snapshot...]
+encode_node_snapshot : NodeSnapshot -> List U8
+encode_node_snapshot = |snap|
+    # Properties: [count:U32LE] then [key:str value:PropertyValue]...
+    props_list = Dict.to_list(snap.properties)
+    prop_count : U32
+    prop_count = Num.int_cast(List.len(props_list))
+    props_bytes = List.walk(props_list, encode_u32(prop_count), |acc, (key, val)|
+        acc
+        |> List.concat(encode_str(key))
+        |> List.concat(encode_property_value(val)))
+
+    # Edges: [count:U32LE] then [half_edge_bytes]...
+    edge_count : U32
+    edge_count = Num.int_cast(List.len(snap.edges))
+    edges_bytes = List.walk(snap.edges, encode_u32(edge_count), |acc, edge|
+        List.concat(acc, encode_half_edge(edge)))
+
+    # Time: [tag:U8][value:U64LE] — 0x01=AtTime always for snapshots
+    time_raw = EventTime.to_u64(snap.time)
+    time_bytes = [0x01] |> List.concat(encode_u64(time_raw))
+
+    # SQ snapshot: [count:U32LE] then [global_id:U128][part_id:U64][state_len:U32][state_bytes]...
+    sq_count : U32
+    sq_count = Num.int_cast(List.len(snap.sq_snapshot))
+    sq_bytes = List.walk(snap.sq_snapshot, encode_u32(sq_count), |acc, entry|
+        state_len : U32
+        state_len = Num.int_cast(List.len(entry.state_bytes))
+        acc
+        |> List.concat(encode_u128(entry.global_id))
+        |> List.concat(encode_u64(entry.part_id))
+        |> List.concat(encode_u32(state_len))
+        |> List.concat(entry.state_bytes))
+
+    props_bytes
+    |> List.concat(edges_bytes)
+    |> List.concat(time_bytes)
+    |> List.concat(sq_bytes)
+
+## Decode a NodeSnapshot from the buffer at the given offset.
+decode_node_snapshot : List U8, U64 -> Result { snapshot : NodeSnapshot, next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
+decode_node_snapshot = |buf, offset|
+    when decode_u32(buf, offset) is
+        Err(_) -> Err(OutOfBounds)
+        Ok({ val: prop_count_u32, next: props_start }) ->
+            prop_count = Num.int_cast(prop_count_u32)
+            when decode_properties(buf, props_start, prop_count, Dict.empty({})) is
+                Err(e) -> Err(e)
+                Ok({ val: properties, next: edges_count_start }) ->
+                    when decode_u32(buf, edges_count_start) is
+                        Err(_) -> Err(OutOfBounds)
+                        Ok({ val: edge_count_u32, next: edges_start }) ->
+                            edge_count = Num.int_cast(edge_count_u32)
+                            when decode_edges(buf, edges_start, edge_count, []) is
+                                Err(e) -> Err(e)
+                                Ok({ val: edges, next: time_start }) ->
+                                    when decode_event_time(buf, time_start) is
+                                        Err(e) -> Err(e)
+                                        Ok({ val: time, next: sq_count_start }) ->
+                                            when decode_u32(buf, sq_count_start) is
+                                                Err(_) -> Err(OutOfBounds)
+                                                Ok({ val: sq_count_u32, next: sq_start }) ->
+                                                    sq_count = Num.int_cast(sq_count_u32)
+                                                    when decode_sq_snapshots(buf, sq_start, sq_count, []) is
+                                                        Err(e) -> Err(e)
+                                                        Ok({ val: sq_snapshot, next: final_next }) ->
+                                                            Ok({
+                                                                snapshot: { properties, edges, time, sq_snapshot },
+                                                                next: final_next,
+                                                            })
+
+## Decode N properties from the buffer.
+decode_properties : List U8, U64, U64, Dict Str PropertyValue -> Result { val : Dict Str PropertyValue, next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
+decode_properties = |buf, offset, remaining, acc|
+    if remaining == 0 then
+        Ok({ val: acc, next: offset })
+    else
+        when decode_str(buf, offset) is
+            Err(OutOfBounds) -> Err(OutOfBounds)
+            Err(BadUtf8) -> Err(BadUtf8)
+            Ok({ val: key, next: val_start }) ->
+                when decode_property_value(buf, val_start) is
+                    Err(e) -> Err(e)
+                    Ok({ val: pv, next: next_offset }) ->
+                        decode_properties(buf, next_offset, remaining - 1, Dict.insert(acc, key, pv))
+
+## Decode N HalfEdges from the buffer.
+decode_edges : List U8, U64, U64, List HalfEdge -> Result { val : List HalfEdge, next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
+decode_edges = |buf, offset, remaining, acc|
+    if remaining == 0 then
+        Ok({ val: acc, next: offset })
+    else
+        when decode_half_edge(buf, offset) is
+            Err(OutOfBounds) -> Err(OutOfBounds)
+            Err(BadUtf8) -> Err(BadUtf8)
+            Err(InvalidDirection) -> Err(InvalidDirection)
+            Ok({ val: edge, next: next_offset }) ->
+                decode_edges(buf, next_offset, remaining - 1, List.append(acc, edge))
+
+## Decode an EventTime from the buffer (tag + optional U64).
+decode_event_time : List U8, U64 -> Result { val : EventTime, next : U64 } [OutOfBounds, InvalidTag, BadUtf8, InvalidDirection]
+decode_event_time = |buf, offset|
+    when List.get(buf, offset) is
+        Err(_) -> Err(OutOfBounds)
+        Ok(tag) ->
+            if tag == 0x00 then
+                Ok({ val: EventTime.min_value, next: offset + 1 })
+            else if tag == 0x01 then
+                when decode_u64(buf, offset + 1) is
+                    Ok({ val: raw, next }) -> Ok({ val: EventTime.from_u64(raw), next })
+                    Err(e) -> Err(e)
+            else
+                Err(InvalidTag)
+
+## Decode N SqStateSnapshot entries from the buffer.
+decode_sq_snapshots : List U8, U64, U64, List SqStateSnapshot -> Result { val : List SqStateSnapshot, next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
+decode_sq_snapshots = |buf, offset, remaining, acc|
+    if remaining == 0 then
+        Ok({ val: acc, next: offset })
+    else
+        when decode_u128(buf, offset) is
+            Err(e) -> Err(e)
+            Ok({ val: global_id, next: pid_start }) ->
+                when decode_u64(buf, pid_start) is
+                    Err(e) -> Err(e)
+                    Ok({ val: part_id, next: slen_start }) ->
+                        when decode_u32(buf, slen_start) is
+                            Err(_) -> Err(OutOfBounds)
+                            Ok({ val: state_len_u32, next: state_start }) ->
+                                state_len = Num.int_cast(state_len_u32)
+                                state_bytes = List.sublist(buf, { start: state_start, len: state_len })
+                                if List.len(state_bytes) == state_len then
+                                    entry : SqStateSnapshot
+                                    entry = { global_id, part_id, state_bytes }
+                                    decode_sq_snapshots(buf, state_start + state_len, remaining - 1, List.append(acc, entry))
+                                else
+                                    Err(OutOfBounds)
+
 # ===== Tests =====
 
 # -- U16 roundtrip --
@@ -1156,4 +1301,99 @@ expect
 expect
     when decode_u32([0x01], 0) is
         Err(OutOfBounds) -> Bool.true
+        _ -> Bool.false
+
+# ===== NodeSnapshot Tests =====
+
+# -- Empty snapshot roundtrip --
+expect
+    snap : NodeSnapshot
+    snap = {
+        properties: Dict.empty({}),
+        edges: [],
+        time: EventTime.from_parts({ millis: 1000, message_seq: 0, event_seq: 0 }),
+        sq_snapshot: [],
+    }
+    encoded = encode_node_snapshot(snap)
+    when decode_node_snapshot(encoded, 0) is
+        Ok({ snapshot }) ->
+            Dict.is_empty(snapshot.properties)
+            and List.is_empty(snapshot.edges)
+            and snapshot.time == EventTime.from_parts({ millis: 1000, message_seq: 0, event_seq: 0 })
+            and List.is_empty(snapshot.sq_snapshot)
+        _ -> Bool.false
+
+# -- Snapshot with properties --
+expect
+    snap : NodeSnapshot
+    snap = {
+        properties: Dict.empty({}) |> Dict.insert("name", Deserialized(Str("Alice"))) |> Dict.insert("age", Deserialized(Integer(30))),
+        edges: [],
+        time: EventTime.from_parts({ millis: 2000, message_seq: 1, event_seq: 0 }),
+        sq_snapshot: [],
+    }
+    encoded = encode_node_snapshot(snap)
+    when decode_node_snapshot(encoded, 0) is
+        Ok({ snapshot }) ->
+            Dict.len(snapshot.properties) == 2
+        _ -> Bool.false
+
+# -- Snapshot with edges --
+expect
+    edge1 = { edge_type: "KNOWS", direction: Outgoing, other: QuineId.from_bytes([0x01]) }
+    edge2 = { edge_type: "FOLLOWS", direction: Incoming, other: QuineId.from_bytes([0x02]) }
+    snap : NodeSnapshot
+    snap = {
+        properties: Dict.empty({}),
+        edges: [edge1, edge2],
+        time: EventTime.from_parts({ millis: 3000, message_seq: 0, event_seq: 0 }),
+        sq_snapshot: [],
+    }
+    encoded = encode_node_snapshot(snap)
+    when decode_node_snapshot(encoded, 0) is
+        Ok({ snapshot }) ->
+            List.len(snapshot.edges) == 2
+        _ -> Bool.false
+
+# -- Snapshot with SQ state entries --
+expect
+    sq_entry : SqStateSnapshot
+    sq_entry = { global_id: 42u128, part_id: 7u64, state_bytes: [0x20] }
+    snap : NodeSnapshot
+    snap = {
+        properties: Dict.empty({}),
+        edges: [],
+        time: EventTime.from_parts({ millis: 4000, message_seq: 0, event_seq: 0 }),
+        sq_snapshot: [sq_entry],
+    }
+    encoded = encode_node_snapshot(snap)
+    when decode_node_snapshot(encoded, 0) is
+        Ok({ snapshot }) ->
+            List.len(snapshot.sq_snapshot) == 1
+            and (
+                when List.get(snapshot.sq_snapshot, 0) is
+                    Ok(entry) -> entry.global_id == 42u128 and entry.part_id == 7u64 and entry.state_bytes == [0x20]
+                    _ -> Bool.false
+            )
+        _ -> Bool.false
+
+# -- Full snapshot roundtrip --
+expect
+    edge = { edge_type: "KNOWS", direction: Outgoing, other: QuineId.from_bytes([0xAB]) }
+    sq_entry : SqStateSnapshot
+    sq_entry = { global_id: 100u128, part_id: 50u64, state_bytes: [0x22, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00] }
+    snap : NodeSnapshot
+    snap = {
+        properties: Dict.empty({}) |> Dict.insert("x", Deserialized(Integer(99))),
+        edges: [edge],
+        time: EventTime.from_parts({ millis: 5000, message_seq: 2, event_seq: 1 }),
+        sq_snapshot: [sq_entry],
+    }
+    encoded = encode_node_snapshot(snap)
+    when decode_node_snapshot(encoded, 0) is
+        Ok({ snapshot }) ->
+            Dict.len(snapshot.properties) == 1
+            and List.len(snapshot.edges) == 1
+            and snapshot.time == EventTime.from_parts({ millis: 5000, message_seq: 2, event_seq: 1 })
+            and List.len(snapshot.sq_snapshot) == 1
         _ -> Bool.false
