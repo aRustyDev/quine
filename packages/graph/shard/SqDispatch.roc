@@ -521,3 +521,52 @@ expect
             EmitSqResult({ query_id }) -> query_id == global_id
             _ -> Bool.false
     )
+
+# Integration test: register SQ on shard, dispatch to node, verify result
+expect
+    # Setup: create shard with one awake node
+    qid = QuineId.from_bytes([0x01])
+    node0 = empty_node_state(qid)
+
+    # Create a LocalProperty SQ watching "status" with Any constraint
+    query : MvStandingQuery
+    query = LocalProperty({ prop_key: "status", constraint: Any, aliased_as: Ok("s") })
+    pid = compute_part_id(query)
+    global_id : StandingQueryId
+    global_id = 100u128
+
+    # Build lookup function
+    lookup = |p| if p == pid then Ok(query) else Err(NotFound)
+
+    # Step 1: Create subscription on the node
+    subscriber : SqMsgSubscriber
+    subscriber = GlobalSubscriber({ global_id })
+    create_cmd : SqCommand
+    create_cmd = CreateSqSubscription({ subscriber, query, global_id })
+    r1 = handle_sq_command(node0, create_cmd, lookup)
+    has_state = Dict.len(r1.state.sq_states) == 1
+
+    # Step 2: Set property "status" = "active"
+    pv = PropertyValue.from_value(Str("active"))
+    events = [PropertySet({ key: "status", value: pv })]
+    r2 = dispatch_sq_events(r1.state, events, lookup)
+
+    # Step 3: Verify EmitSqResult with positive match
+    has_emit = List.any(r2.effects, |e|
+        when e is
+            EmitSqResult({ query_id: qid_val, result }) ->
+                qid_val == global_id && result.is_positive_match
+            _ -> Bool.false)
+
+    # Step 4: Change property to different value
+    pv2 = PropertyValue.from_value(Str("inactive"))
+    events2 = [PropertySet({ key: "status", value: pv2 })]
+    r3 = dispatch_sq_events(r2.state, events2, lookup)
+
+    # Should still produce EmitSqResult (value changed but still matches Any)
+    has_emit2 = List.any(r3.effects, |e|
+        when e is
+            EmitSqResult(_) -> Bool.true
+            _ -> Bool.false)
+
+    has_state && has_emit && has_emit2
