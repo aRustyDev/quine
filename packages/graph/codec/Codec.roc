@@ -3,6 +3,8 @@ module [
     decode_node_msg,
     encode_shard_envelope,
     decode_shard_envelope,
+    encode_u32,
+    decode_u32,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -38,6 +40,32 @@ decode_u16 = |buf, offset|
             Ok({ val, next: offset + 2 })
 
         _ -> Err(OutOfBounds)
+
+## Encode a U32 in little-endian byte order.
+encode_u32 : U32 -> List U8
+encode_u32 = |n|
+    List.range({ start: At(0), end: Before(4) })
+    |> List.map(|i|
+        Num.int_cast(Num.shift_right_zf_by(n, Num.int_cast(i) * 8) |> Num.bitwise_and(0xFF)))
+
+## Decode a U32 from little-endian bytes at the given offset.
+decode_u32 : List U8, U64 -> Result { val : U32, next : U64 } [OutOfBounds]
+decode_u32 = |buf, offset|
+    if offset + 4 > List.len(buf) then
+        Err(OutOfBounds)
+    else
+        val = List.walk(
+            List.range({ start: At(0u64), end: Before(4u64) }),
+            0u32,
+            |acc, i|
+                when List.get(buf, offset + i) is
+                    Ok(b) ->
+                        shifted : U32
+                        shifted = Num.shift_left_by(Num.int_cast(b), Num.int_cast(i) * 8)
+                        Num.bitwise_or(acc, shifted)
+                    Err(_) -> acc,
+        )
+        Ok({ val, next: offset + 4 })
 
 ## Encode a U64 in little-endian byte order.
 encode_u64 : U64 -> List U8
@@ -1110,4 +1138,22 @@ expect
         Ok({ val: SqCmd(NewSqResult(decoded_sr)) }) ->
             List.len(decoded_sr.result_group) == 1
 
+        _ -> Bool.false
+
+# -- U32 roundtrip --
+expect
+    encoded = encode_u32(0)
+    when decode_u32(encoded, 0) is
+        Ok({ val: 0, next: 4 }) -> Bool.true
+        _ -> Bool.false
+
+expect
+    encoded = encode_u32(0xDEADBEEF)
+    when decode_u32(encoded, 0) is
+        Ok({ val, next: 4 }) -> val == 0xDEADBEEF
+        _ -> Bool.false
+
+expect
+    when decode_u32([0x01], 0) is
+        Err(OutOfBounds) -> Bool.true
         _ -> Bool.false

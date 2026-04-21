@@ -7,6 +7,8 @@ module [
     min_value,
     max_value,
     advance_event,
+    to_u64,
+    from_u64,
 ]
 
 ## A high-resolution timestamp for graph events.
@@ -89,6 +91,14 @@ advance_event = |@EventTime(packed)|
     else
         @EventTime(packed + 1)
 
+## Extract the raw packed U64 (for codec serialization).
+to_u64 : EventTime -> U64
+to_u64 = |@EventTime(packed)| packed
+
+## Construct from a raw packed U64 (for codec deserialization).
+from_u64 : U64 -> EventTime
+from_u64 = |packed| @EventTime(packed)
+
 ## Strict less-than comparison (helper for tests)
 is_less : EventTime, EventTime -> Bool
 is_less = |@EventTime(a), @EventTime(b)| a < b
@@ -144,3 +154,7 @@ expect
     et = from_parts({ millis: 1000, message_seq: 5, event_seq: 0xFF })
     et2 = advance_event(et)
     event_seq(et2) == 0 and message_seq(et2) == 5 and millis(et2) == 1000
+
+expect
+    et = from_parts({ millis: 1000, message_seq: 5, event_seq: 3 })
+    to_u64(et) |> from_u64 == et
