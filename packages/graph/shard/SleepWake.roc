@@ -11,11 +11,13 @@ import id.QuineId exposing [QuineId]
 import id.EventTime
 import model.NodeSnapshot exposing [NodeSnapshot, SqStateSnapshot]
 import types.Config exposing [ShardConfig]
-import types.NodeEntry exposing [NodeEntry, WakefulState, SqStateKey, SqNodeState, empty_node_state, compute_cost_to_sleep]
+import types.NodeEntry exposing [NodeEntry, NodeState, WakefulState, SqStateKey, SqNodeState, empty_node_state, compute_cost_to_sleep]
 import types.Effects exposing [Effect]
 import types.Messages exposing [NodeMessage]
+import model.PropertyValue
 import standing_index.WatchableEventIndex
 import standing_state.SqPartState exposing [SqSubscription]
+import codec.Codec
 import codec.SqStateCodec
 
 ## Return true if the node should NOT be put to sleep right now.
@@ -29,6 +31,18 @@ should_decline_sleep = |{ last_write, last_access, now, config }|
         config.decline_sleep_when_access_within_ms > 0
         and (now - last_access) < config.decline_sleep_when_access_within_ms
     recent_write or recent_access
+
+## Create a NodeSnapshot from a node's live state for persistence.
+##
+## Flattens the edge Dict (edge_type -> List HalfEdge) into a single List HalfEdge,
+## serializes SQ states, and stamps with the current time.
+create_snapshot : NodeState, U64 -> NodeSnapshot
+create_snapshot = |state, now|
+    flat_edges = Dict.walk(state.edges, [], |acc, _edge_type, edge_list|
+        List.concat(acc, edge_list))
+    sq_snap = build_sq_snapshot(state.sq_states)
+    time = EventTime.from_parts({ millis: now, message_seq: 0, event_seq: 0 })
+    { properties: state.properties, edges: flat_edges, time, sq_snapshot: sq_snap }
 
 ## Attempt to begin putting a node to sleep.
 ##
@@ -59,7 +73,9 @@ begin_sleep = |nodes, qid, now, config|
                             last_access,
                         })
                         new_nodes = Dict.insert(nodes, qid, new_entry)
-                        persist_effect = Persist({ command: PersistSnapshot({ id: qid, snapshot_bytes: [] }) })
+                        snapshot = create_snapshot(state, now)
+                        snapshot_bytes = Codec.encode_node_snapshot(snapshot)
+                        persist_effect = Persist({ command: PersistSnapshot({ id: qid, snapshot_bytes }) })
                         { nodes: new_nodes, effects: [persist_effect] }
 
 ## Finalize the sleep of a node by removing it from the shard's live dict.
@@ -148,6 +164,57 @@ build_sq_snapshot = |sq_states|
     )
 
 # ===== Tests =====
+
+expect
+    # create_snapshot flattens edges and builds SQ snapshot
+    qid = QuineId.from_bytes([0x01])
+    pv = PropertyValue.from_value(Str("test"))
+    edge = { edge_type: "KNOWS", direction: Outgoing, other: QuineId.from_bytes([0x02]) }
+    ns = {
+        id: qid,
+        properties: Dict.empty({}) |> Dict.insert("name", pv),
+        edges: Dict.empty({}) |> Dict.insert("KNOWS", [edge]),
+        journal: [],
+        snapshot_base: None,
+        edge_storage: Inline,
+        sq_states: Dict.empty({}),
+        watchable_event_index: WatchableEventIndex.empty,
+    }
+    snap = create_snapshot(ns, 5000)
+    Dict.len(snap.properties) == 1
+    and List.len(snap.edges) == 1
+    and List.is_empty(snap.sq_snapshot)
+
+expect
+    # begin_sleep on eligible node produces non-empty snapshot_bytes
+    config = {
+        soft_limit: 10_000u32,
+        hard_limit: 50_000u32,
+        lru_check_interval_ms: 10_000u64,
+        ask_timeout_ms: 5_000u64,
+        decline_sleep_when_write_within_ms: 100u64,
+        decline_sleep_when_access_within_ms: 0u64,
+        sleep_deadline_ms: 3_000u64,
+        max_edges_warning_threshold: 100_000u64,
+    }
+    qid = QuineId.from_bytes([0x01])
+    pv = PropertyValue.from_value(Str("hello"))
+    base = empty_node_state(qid)
+    ns = { base & properties: Dict.empty({}) |> Dict.insert("key", pv) }
+    entry = Awake({
+        state: ns,
+        wakeful: Awake,
+        cost_to_sleep: 0,
+        last_write: 500u64,
+        last_access: 500u64,
+    })
+    nodes = Dict.insert(Dict.empty({}), qid, entry)
+    result = begin_sleep(nodes, qid, 1000u64, config)
+    # Check that the Persist effect has non-empty snapshot_bytes
+    List.any(result.effects, |e|
+        when e is
+            Persist({ command: PersistSnapshot({ snapshot_bytes }) }) -> !(List.is_empty(snapshot_bytes))
+            _ -> Bool.false)
 
 expect
     # should_decline_sleep true for recent write
