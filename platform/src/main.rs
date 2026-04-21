@@ -1,9 +1,12 @@
 // platform/src/main.rs
 
 mod channels;
+mod codec;
 mod config;
 mod effects;
+pub mod ingest;
 mod persistence_io;
+pub mod quine_id;
 mod roc_glue;
 mod shard_worker;
 mod timer;

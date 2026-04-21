@@ -1,0 +1,8 @@
+{"type":"set_prop","node_id":"alice","key":"name","value":"Alice"}
+{"type":"set_prop","node_id":"alice","key":"age","value":30}
+{"type":"set_prop","node_id":"bob","key":"name","value":"Bob"}
+{"type":"set_prop","node_id":"bob","key":"age","value":25}
+{"type":"add_edge","node_id":"alice","edge_type":"KNOWS","direction":"outgoing","other":"bob"}
+{"type":"add_edge","node_id":"bob","edge_type":"KNOWS","direction":"outgoing","other":"alice"}
+{"type":"set_prop","node_id":"charlie","key":"name","value":"Charlie"}
+{"type":"add_edge","node_id":"alice","edge_type":"FOLLOWS","direction":"outgoing","other":"charlie"}
