@@ -60,6 +60,12 @@ fn main() {
         std::thread::yield_now();
     }
 
+    // Start SQ result channel for standing query output.
+    // Bounded channel with capacity matching the default SQ config buffer size.
+    // Consumers (Phase 6 output sinks) will read from the receiver.
+    let (sq_result_tx, _sq_result_rx) = crossbeam_channel::bounded::<Vec<u8>>(1024);
+    roc_glue::set_sq_result_sender(sq_result_tx);
+
     // Spawn one worker thread per shard
     let mut handles = Vec::new();
     for (shard_id, rx) in receivers.into_iter().enumerate() {

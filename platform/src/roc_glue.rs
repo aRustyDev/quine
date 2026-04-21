@@ -203,6 +203,25 @@ pub fn persist_sender_ready() -> bool {
 }
 
 // ============================================================
+// Global SQ result sender — used by roc_fx_emit_sq_result.
+// ============================================================
+
+static SQ_RESULT_SENDER: OnceLock<crossbeam_channel::Sender<Vec<u8>>> = OnceLock::new();
+
+/// Set the global SQ result sender. Must be called before any
+/// Roc code that uses emit_sq_result!.
+pub fn set_sq_result_sender(tx: crossbeam_channel::Sender<Vec<u8>>) {
+    if SQ_RESULT_SENDER.set(tx).is_err() {
+        panic!("SQ result sender already initialized");
+    }
+}
+
+/// Get a reference to the SQ result sender (for tests).
+pub fn sq_result_sender() -> Option<&'static crossbeam_channel::Sender<Vec<u8>>> {
+    SQ_RESULT_SENDER.get()
+}
+
+// ============================================================
 // Host-provided effect functions — Roc calls these via roc_fx_*.
 //
 // Calling convention (verified from Zig host and nm output):
@@ -227,6 +246,7 @@ pub fn init() {
         roc_fx_log as _,
         roc_fx_send_to_shard as _,
         roc_fx_persist_async as _,
+        roc_fx_emit_sq_result as _,
     ];
     #[allow(forgetting_references)]
     std::mem::forget(std::hint::black_box(funcs));
@@ -312,4 +332,29 @@ pub extern "C" fn roc_fx_persist_async(cmd: &RocList<u8>) -> u64 {
     }
 
     request_id
+}
+
+/// Emit a standing query result to the host's result channel.
+/// Roc signature: emit_sq_result! : List U8 => U8
+/// Returns 0 on success, 1 if the channel is full.
+#[no_mangle]
+pub extern "C" fn roc_fx_emit_sq_result(payload: &RocList<u8>) -> u8 {
+    if let Some(tx) = SQ_RESULT_SENDER.get() {
+        let bytes = payload.as_slice().to_vec();
+        match tx.try_send(bytes) {
+            Ok(()) => 0,
+            Err(crossbeam_channel::TrySendError::Full(_)) => {
+                eprintln!("emit_sq_result: result channel full (backpressure)");
+                1
+            }
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                eprintln!("emit_sq_result: result channel disconnected");
+                1
+            }
+        }
+    } else {
+        // No consumer registered — succeed silently (results are dropped).
+        // Normal during tests or when no output sinks are configured.
+        0
+    }
 }
