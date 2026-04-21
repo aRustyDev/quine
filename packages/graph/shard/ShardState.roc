@@ -4,6 +4,7 @@ module [
     new,
     handle_message,
     on_timer,
+    complete_node_wake,
     pending_effects,
     clear_effects,
     node_entry,
@@ -24,6 +25,8 @@ import types.Config exposing [ShardConfig, SqConfig, default_config, default_sq_
 import types.NodeEntry exposing [NodeEntry, compute_cost_to_sleep, empty_node_state]
 import types.Messages exposing [NodeMessage]
 import types.Effects exposing [Effect, BackpressureSignal]
+import model.NodeSnapshot exposing [NodeSnapshot]
+import model.PropertyValue
 import Lru exposing [LruEntry]
 import Dispatch
 import SleepWake
@@ -158,6 +161,53 @@ on_timer = |@ShardState(s), now|
             nodes: final_nodes,
             pending_effects: all_effects,
         })
+
+## Complete a node's wake sequence after its snapshot has been loaded.
+##
+## If the node is currently Waking, transitions it to Awake using the
+## provided snapshot, then dispatches all queued messages that arrived
+## while the node was sleeping.
+##
+## If the node is not in Waking state (e.g., it was already awake due to
+## a race), the snapshot is discarded and the state is returned unchanged.
+complete_node_wake : ShardState, QuineId, [None, Some NodeSnapshot], U64 -> ShardState
+complete_node_wake = |@ShardState(s), qid, maybe_snapshot, now|
+    when Dict.get(s.nodes, qid) is
+        Ok(Waking({ queued })) ->
+            wake_result = SleepWake.complete_wake(s.nodes, qid, maybe_snapshot, now)
+            # Replay queued messages through the now-awake node
+            lookup_fn = |pid| Dict.get(s.part_index, pid) |> Result.map_err(|_| NotFound)
+            { final_nodes, all_effects } = List.walk(
+                queued,
+                { final_nodes: wake_result.nodes, all_effects: wake_result.effects },
+                |acc, msg|
+                    when Dict.get(acc.final_nodes, qid) is
+                        Ok(Awake({ state, wakeful, cost_to_sleep: _, last_write, last_access: _ })) ->
+                            result = Dispatch.dispatch_node_msg(state, msg, lookup_fn)
+                            new_cost = compute_cost_to_sleep(result.state)
+                            new_entry = Awake({
+                                state: result.state,
+                                wakeful,
+                                cost_to_sleep: new_cost,
+                                last_write,
+                                last_access: now,
+                            })
+                            {
+                                final_nodes: Dict.insert(acc.final_nodes, qid, new_entry),
+                                all_effects: List.concat(acc.all_effects, result.effects),
+                            }
+                        _ -> acc,
+            )
+            new_lru = Lru.touch(s.lru_entries, qid, now, 0)
+            @ShardState({ s &
+                nodes: final_nodes,
+                lru_entries: new_lru,
+                pending_effects: all_effects,
+            })
+
+        _ ->
+            # Not in Waking state — discard snapshot, no effects
+            @ShardState({ s & pending_effects: [] })
 
 ## Return the pending effects list from a ShardState (for testing).
 pending_effects : ShardState -> List Effect
@@ -442,3 +492,36 @@ expect
         when drained.state is
             @ShardState(s) -> List.is_empty(s.sq_result_buffer)
     has_two && is_empty
+
+expect
+    # complete_node_wake transitions Waking to Awake and replays queued SetProp
+    config = default_config
+    shard = new(0u32, 4u32, config)
+    qid = QuineId.from_bytes([0x01])
+    # Set up a Waking entry with one queued SetProp message
+    pv = PropertyValue.from_value(Str("hello"))
+    queued_msg : NodeMessage
+    queued_msg = LiteralCmd(SetProp({ key: "name", value: pv, reply_to: 0 }))
+    waking_entry : NodeEntry
+    waking_entry = Waking({ queued: [queued_msg] })
+    shard2 = with_awake_node(shard, qid, waking_entry)
+    # Complete wake with no snapshot (new node)
+    shard3 = complete_node_wake(shard2, qid, None, 1000u64)
+    # Node should be Awake with the SetProp applied
+    when node_entry(shard3, qid) is
+        Ok(Awake({ state })) ->
+            when Dict.get(state.properties, "name") is
+                Ok(_) -> Bool.true
+                Err(_) -> Bool.false
+        _ -> Bool.false
+
+expect
+    # complete_node_wake on non-Waking node returns unchanged state
+    config = default_config
+    shard = new(0u32, 4u32, config)
+    qid = QuineId.from_bytes([0x02])
+    shard2 = complete_node_wake(shard, qid, None, 1000u64)
+    # Should have no entry for this node
+    when node_entry(shard2, qid) is
+        Err(_) -> Bool.true
+        _ -> Bool.false
