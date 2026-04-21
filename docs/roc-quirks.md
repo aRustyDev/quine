@@ -96,3 +96,74 @@ QuineId implements [Hash { hash: quine_id_hash }]
 ```
 
 **Discovered in:** Phase 3c (graph-to-platform wiring)
+
+---
+
+## 6. Sub-Package Imports Only Resolve One Level
+
+**Problem:** Roc's package routing only resolves one level of indirection. If package A declares a dependency on package B (e.g., `standing: "../standing/main.roc"`), and B declares sub-packages (e.g., `state: "./state/main.roc"`), A **cannot** import B's sub-packages via chaining (e.g., `import standing.state.SqPartState` does not work).
+
+**Workaround:** Each consuming package must declare **direct** dependencies on the sub-packages it needs, using distinct shorthand names:
+
+```roc
+# packages/graph/shard/main.roc
+package [...] {
+    standing_index: "../standing/index/main.roc",
+    standing_ast: "../standing/ast/main.roc",
+    standing_state: "../standing/state/main.roc",
+    standing_result: "../standing/result/main.roc",
+    standing_messages: "../standing/messages/main.roc",
+}
+```
+
+Then in module files:
+```roc
+import standing_state.SqPartState exposing [SqPartState]
+import standing_ast.MvStandingQuery exposing [MvStandingQuery]
+```
+
+**Affected packages:** `packages/graph/shard/`, `packages/graph/types/`, `packages/graph/codec/` — all need direct references to standing sub-packages.
+
+**Discovered in:** Phase 4c (graph layer integration)
+
+---
+
+## 7. Record Field Names Collide with Imported Functions
+
+**Problem:** When a module imports a function (e.g., `query_part_id` from `MvStandingQuery`) and also destructures records containing a field with the same name, Roc reports a `DUPLICATE NAME` error. The compiler treats the imported name and the destructured binding as conflicting.
+
+**Workaround:** Use renamed bindings in destructuring patterns:
+
+```roc
+# Instead of:
+CancelSqSubscription({ query_part_id, global_id }) ->  # ERROR: collides with imported query_part_id
+
+# Use:
+CancelSqSubscription({ query_part_id: cancel_pid, global_id: cancel_gid }) ->  # OK
+```
+
+Alternatively, wrap the imported function in a local alias:
+```roc
+compute_part_id = |query| MvStandingQuery.query_part_id(query)
+```
+
+**Discovered in:** Phase 4c (SqDispatch.roc)
+
+---
+
+## 8. Record Update Syntax Requires Plain Variables
+
+**Problem:** Roc's record update syntax (`{ x & field: val }`) requires `x` to be a plain variable, not a field access expression. `{ acc.state & sq_states: new_states }` fails to compile.
+
+**Workaround:** Bind the field to an intermediate variable first:
+
+```roc
+# Instead of:
+{ acc.state & sq_states: new_states }  # ERROR
+
+# Use:
+current_node = acc.state
+{ current_node & sq_states: new_states }  # OK
+```
+
+**Discovered in:** Phase 4c (SqDispatch.dispatch_sq_events)
