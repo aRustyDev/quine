@@ -49,8 +49,7 @@ handle_message! = |state, msg|
             if tag == tag_shard_msg then
                 handle_shard_msg!(state, msg)
             else if tag == tag_persist_result then
-                Effect.log!(3, "graph-app: persist result received ($(Num.to_str(List.len(msg))) bytes)")
-                state
+                handle_persist_result!(state, msg)
             else
                 Effect.log!(1, "graph-app: unknown tag 0x$(u8_to_hex(tag))")
                 state
@@ -76,6 +75,61 @@ on_timer! = |state, _kind|
     now = Effect.current_time!({})
     updated = ShardState.on_timer(state, now)
     drain_effects!(updated)
+
+## Handle a persistence result: decode the response and complete node wake.
+##
+## Persist result format (from persistence_io.rs):
+##   Found:     [TAG_PERSIST_RESULT][0x01][id_len:U16LE][id_bytes...][snap_len:U32LE][snapshot_bytes...]
+##   Not found: [TAG_PERSIST_RESULT][0x00][id_len:U16LE][id_bytes...]
+handle_persist_result! : ShardState, List U8 => ShardState
+handle_persist_result! = |state, msg|
+    # msg[0] = TAG_PERSIST_RESULT (already matched)
+    # msg[1] = found flag (0x00 or 0x01)
+    when List.get(msg, 1) is
+        Err(_) ->
+            Effect.log!(1, "graph-app: persist result too short")
+            state
+        Ok(found_flag) ->
+            # Decode id_len (U16LE at offset 2)
+            when (List.get(msg, 2), List.get(msg, 3)) is
+                (Ok(lo), Ok(hi)) ->
+                    id_len : U64
+                    id_len = Num.int_cast(lo) |> Num.add(Num.shift_left_by(Num.int_cast(hi), 8))
+                    id_bytes = List.sublist(msg, { start: 4, len: id_len })
+                    if List.len(id_bytes) != id_len then
+                        Effect.log!(1, "graph-app: persist result truncated id")
+                        state
+                    else
+                        qid = QuineId.from_bytes(id_bytes)
+                        now = Effect.current_time!({})
+                        if found_flag == 0x01 then
+                            # Found: decode snapshot_len (U32LE) then snapshot_bytes
+                            snap_len_start = 4 + id_len
+                            when decode_u32_at(msg, snap_len_start) is
+                                Err(_) ->
+                                    Effect.log!(1, "graph-app: persist result truncated snap_len")
+                                    state
+                                Ok(snap_len) ->
+                                    snap_start = snap_len_start + 4
+                                    snapshot_bytes = List.sublist(msg, { start: snap_start, len: Num.int_cast(snap_len) })
+                                    when Codec.decode_node_snapshot(snapshot_bytes, 0) is
+                                        Ok({ snapshot }) ->
+                                            Effect.log!(3, "graph-app: restoring node from snapshot")
+                                            updated = ShardState.complete_node_wake(state, qid, Some(snapshot), now)
+                                            drain_effects!(updated)
+                                        Err(_) ->
+                                            Effect.log!(1, "graph-app: failed to decode snapshot, waking with empty state")
+                                            updated = ShardState.complete_node_wake(state, qid, None, now)
+                                            drain_effects!(updated)
+                        else
+                            # Not found: wake with empty state
+                            Effect.log!(3, "graph-app: no snapshot found, waking new node")
+                            updated = ShardState.complete_node_wake(state, qid, None, now)
+                            drain_effects!(updated)
+
+                _ ->
+                    Effect.log!(1, "graph-app: persist result missing id_len")
+                    state
 
 ## Execute all pending effects and return the state with effects cleared.
 drain_effects! : ShardState => ShardState
@@ -175,6 +229,25 @@ encode_persist_command = |command|
             id_len_hi = Num.int_cast(Num.shift_right_zf_by(Num.to_u16(List.len(id_bytes)), 8))
             [0x02, id_len_lo, id_len_hi]
             |> List.concat(id_bytes)
+
+## Decode a U32 from little-endian bytes at the given offset in a list.
+## Local helper — avoids needing to export U32 decode from Codec.
+decode_u32_at : List U8, U64 -> Result U32 [OutOfBounds]
+decode_u32_at = |buf, offset|
+    b0_result = List.get(buf, offset)
+    b1_result = List.get(buf, offset + 1)
+    b2_result = List.get(buf, offset + 2)
+    b3_result = List.get(buf, offset + 3)
+    when (b0_result, b1_result, b2_result, b3_result) is
+        (Ok(b0), Ok(b1), Ok(b2), Ok(b3)) ->
+            val : U32
+            val =
+                Num.int_cast(b0)
+                |> Num.bitwise_or(Num.shift_left_by(Num.int_cast(b1), 8))
+                |> Num.bitwise_or(Num.shift_left_by(Num.int_cast(b2), 16))
+                |> Num.bitwise_or(Num.shift_left_by(Num.int_cast(b3), 24))
+            Ok(val)
+        _ -> Err(OutOfBounds)
 
 ## Convert a decode error tag to a human-readable string.
 decode_err_to_str : [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection] -> Str
