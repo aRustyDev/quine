@@ -4,15 +4,19 @@ module [
     complete_sleep,
     start_wake,
     complete_wake,
+    build_sq_snapshot,
 ]
 
 import id.QuineId exposing [QuineId]
-import model.NodeSnapshot exposing [NodeSnapshot]
+import id.EventTime
+import model.NodeSnapshot exposing [NodeSnapshot, SqStateSnapshot]
 import types.Config exposing [ShardConfig]
-import types.NodeEntry exposing [NodeEntry, WakefulState, empty_node_state, compute_cost_to_sleep]
+import types.NodeEntry exposing [NodeEntry, WakefulState, SqStateKey, SqNodeState, empty_node_state, compute_cost_to_sleep]
 import types.Effects exposing [Effect]
 import types.Messages exposing [NodeMessage]
 import standing_index.WatchableEventIndex
+import standing_state.SqPartState exposing [SqSubscription]
+import codec.SqStateCodec
 
 ## Return true if the node should NOT be put to sleep right now.
 ##
@@ -93,6 +97,19 @@ complete_wake = |nodes, qid, maybe_snapshot, now|
         when maybe_snapshot is
             None -> empty_node_state(qid)
             Some(snap) ->
+                restored_sq_states = List.walk(snap.sq_snapshot, Dict.empty({}), |acc, entry|
+                    when SqStateCodec.decode_sq_part_state(entry.state_bytes, 0) is
+                        Ok({ state: part_state }) ->
+                            key : SqStateKey
+                            key = { global_id: entry.global_id, part_id: entry.part_id }
+                            subscription : SqSubscription
+                            subscription = { for_query: entry.part_id, global_id: entry.global_id, subscribers: [] }
+                            sq_node_state : SqNodeState
+                            sq_node_state = { subscription, state: part_state }
+                            Dict.insert(acc, key, sq_node_state)
+                        Err(_) ->
+                            acc
+                )
                 {
                     id: qid,
                     properties: snap.properties,
@@ -100,7 +117,7 @@ complete_wake = |nodes, qid, maybe_snapshot, now|
                     journal: [],
                     snapshot_base: Some(snap),
                     edge_storage: Inline,
-                    sq_states: Dict.empty({}),
+                    sq_states: restored_sq_states,
                     watchable_event_index: WatchableEventIndex.empty,
                 }
     cost = compute_cost_to_sleep(state)
@@ -113,6 +130,22 @@ complete_wake = |nodes, qid, maybe_snapshot, now|
     })
     new_nodes = Dict.insert(nodes, qid, new_entry)
     { nodes: new_nodes, effects: [] }
+
+## Serialize a node's SQ states into snapshot entries.
+## Called during snapshot creation. Each SqPartState is encoded to bytes.
+## Subscriptions are not persisted — re-established via UpdateStandingQueries on wake.
+build_sq_snapshot : Dict SqStateKey SqNodeState -> List SqStateSnapshot
+build_sq_snapshot = |sq_states|
+    Dict.walk(sq_states, [], |acc, key, sq_node_state|
+        state_bytes = SqStateCodec.encode_sq_part_state(sq_node_state.state)
+        entry : SqStateSnapshot
+        entry = {
+            global_id: key.global_id,
+            part_id: key.part_id,
+            state_bytes,
+        }
+        List.append(acc, entry)
+    )
 
 # ===== Tests =====
 
@@ -264,3 +297,45 @@ expect
     when Dict.get(result.nodes, qid) is
         Ok(Awake({ state })) -> Dict.is_empty(state.properties)
         _ -> Bool.false
+
+expect
+    # complete_wake restores SQ states from snapshot's sq_snapshot field
+    qid = QuineId.from_bytes([0x01])
+    state_bytes = SqStateCodec.encode_sq_part_state(
+        LocalPropertyState({ query_part_id: 42u64, value_at_last_report: Err(NeverReported), last_report_was_match: Err(NeverReported) }))
+    sq_entry : SqStateSnapshot
+    sq_entry = { global_id: 5u128, part_id: 42u64, state_bytes }
+    snapshot : NodeSnapshot
+    snapshot = {
+        properties: Dict.empty({}),
+        edges: [],
+        time: EventTime.from_parts({ millis: 1000, message_seq: 0, event_seq: 0 }),
+        sq_snapshot: [sq_entry],
+    }
+    result = complete_wake(Dict.empty({}), qid, Some(snapshot), 2000u64)
+    when Dict.get(result.nodes, qid) is
+        Ok(Awake({ state })) ->
+            key : SqStateKey
+            key = { global_id: 5u128, part_id: 42u64 }
+            Dict.contains(state.sq_states, key)
+        _ -> Bool.false
+
+expect
+    # complete_wake with None snapshot has empty sq_states
+    qid = QuineId.from_bytes([0x02])
+    result = complete_wake(Dict.empty({}), qid, None, 1000u64)
+    when Dict.get(result.nodes, qid) is
+        Ok(Awake({ state })) -> Dict.is_empty(state.sq_states)
+        _ -> Bool.false
+
+expect
+    # build_sq_snapshot produces correct entry count
+    key : SqStateKey
+    key = { global_id: 7u128, part_id: 99u64 }
+    subscription : SqSubscription
+    subscription = { for_query: 99u64, global_id: 7u128, subscribers: [] }
+    sq_node_state : SqNodeState
+    sq_node_state = { subscription, state: UnitState }
+    sq_states = Dict.insert(Dict.empty({}), key, sq_node_state)
+    entries = build_sq_snapshot(sq_states)
+    List.len(entries) == 1
