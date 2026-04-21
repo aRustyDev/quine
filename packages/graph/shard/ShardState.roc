@@ -13,6 +13,8 @@ module [
     lookup_query,
     cancel_standing_query,
     buffer_sq_result,
+    broadcast_update_standing_queries,
+    all_node_ids,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -26,6 +28,7 @@ import Dispatch
 import SleepWake
 import standing_ast.MvStandingQuery exposing [MvStandingQuery]
 import standing_result.StandingQueryResult exposing [StandingQueryId, StandingQueryPartId, StandingQueryResult]
+import standing_state.SqPartState exposing [SqMsgSubscriber]
 
 ## A standing query registered with this shard.
 ##
@@ -256,6 +259,36 @@ buffer_sq_result = |@ShardState(s), result|
     else
         { state: new_state, effect: Err(NoEffect) }
 
+## Generate CreateSqSubscription messages for all awake nodes for all running queries.
+##
+## Called after a new SQ is registered or an existing one is cancelled.
+## Produces SendToNode effects that will be drained by the app layer.
+broadcast_update_standing_queries : ShardState -> ShardState
+broadcast_update_standing_queries = |@ShardState(s)|
+    effects = Dict.walk(s.running_queries, [], |acc, _sq_id, running_query|
+        Dict.walk(s.nodes, acc, |inner_acc, node_id, entry|
+            when entry is
+                Awake(_) ->
+                    subscriber : SqMsgSubscriber
+                    subscriber = GlobalSubscriber({ global_id: running_query.id })
+                    msg = SqCmd(CreateSqSubscription({
+                        subscriber,
+                        query: running_query.query,
+                        global_id: running_query.id,
+                    }))
+                    effect = SendToNode({ target: node_id, msg })
+                    List.append(inner_acc, effect)
+                _ ->
+                    inner_acc
+        )
+    )
+    @ShardState({ s & pending_effects: List.concat(s.pending_effects, effects) })
+
+## Return all node IDs in this shard (for broadcast).
+all_node_ids : ShardState -> List QuineId
+all_node_ids = |@ShardState(s)|
+    Dict.keys(s.nodes)
+
 # ===== Tests =====
 
 expect
@@ -355,3 +388,28 @@ expect
     when out.effect is
         Ok(EmitBackpressure(SqBufferFull)) -> Bool.true
         _ -> Bool.false
+
+expect
+    # broadcast_update_standing_queries generates SendToNode for each awake node x running query
+    shard = new(0, 4, default_config)
+    qid1 = QuineId.from_bytes([0x01])
+    qid2 = QuineId.from_bytes([0x02])
+    ns1 = empty_node_state(qid1)
+    ns2 = empty_node_state(qid2)
+    awake1 : NodeEntry
+    awake1 = Awake({ state: ns1, wakeful: Awake, cost_to_sleep: 0, last_write: 100, last_access: 100 })
+    awake2 : NodeEntry
+    awake2 = Awake({ state: ns2, wakeful: Awake, cost_to_sleep: 0, last_write: 100, last_access: 100 })
+    shard2 = with_awake_node(shard, qid1, awake1)
+    shard3 = with_awake_node(shard2, qid2, awake2)
+    query : MvStandingQuery
+    query = LocalProperty({ prop_key: "name", constraint: Any, aliased_as: Ok("n") })
+    shard4 = register_standing_query(shard3, 1u128, query, Bool.true)
+    shard5 = broadcast_update_standing_queries(shard4)
+    effects = pending_effects(shard5)
+    # Should have 2 SendToNode effects (one per awake node)
+    send_count = List.count_if(effects, |e|
+        when e is
+            SendToNode(_) -> Bool.true
+            _ -> Bool.false)
+    send_count == 2
