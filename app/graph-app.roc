@@ -4,7 +4,8 @@ app [init_shard!, handle_message!, on_timer!]
       shard: "../packages/graph/shard/main.roc",
       codec: "../packages/graph/codec/main.roc",
       routing: "../packages/graph/routing/main.roc",
-      types: "../packages/graph/types/main.roc" }
+      types: "../packages/graph/types/main.roc",
+      standing_result: "../packages/graph/standing/result/main.roc" }
 
 import pf.Effect
 import id.QuineId
@@ -13,6 +14,7 @@ import codec.Codec
 import routing.Routing
 import types.Config exposing [default_config]
 import types.Effects exposing [Effect]
+
 
 ## Type alias required by the platform's `requires { ShardState }` contract.
 ## Maps the app-level ShardState to the shard package's opaque type.
@@ -119,9 +121,40 @@ execute_effect! = |effect|
             {}
 
         EmitSqResult({ query_id, result }) ->
-            is_pos = if result.is_positive_match then "positive" else "cancellation"
-            Effect.log!(2, "graph-app: SQ result for query $(Num.to_str(query_id)): $(is_pos)")
-            {}
+            payload = encode_sq_result_payload(query_id, result)
+            when Effect.emit_sq_result!(payload) is
+                Ok({}) ->
+                    is_pos = if result.is_positive_match then "+" else "-"
+                    Effect.log!(3, "graph-app: SQ result $(is_pos) for query $(Num.to_str(query_id))")
+                Err(SqBufferFull) ->
+                    Effect.log!(1, "graph-app: SQ result buffer full for query $(Num.to_str(query_id))")
+
+## Encode a StandingQueryResult for the host's emit_sq_result! function.
+## Format: [query_id_lo:U64LE] [query_id_hi:U64LE] [is_positive:U8] [pair_count:U32LE]
+## Full QuineValue serialization deferred to Phase 5.
+encode_sq_result_payload : U128, { is_positive_match : Bool, data : Dict Str _ } -> List U8
+encode_sq_result_payload = |query_id, result|
+    lo = Num.int_cast(Num.bitwise_and(query_id, 0xFFFFFFFFFFFFFFFF)) |> encode_u64_le
+    hi = Num.int_cast(Num.shift_right_zf_by(query_id, 64)) |> encode_u64_le
+    is_positive_byte = if result.is_positive_match then 1u8 else 0u8
+    pair_count = Dict.len(result.data) |> Num.to_u32
+    count_bytes = encode_u32_le(pair_count)
+    lo
+    |> List.concat(hi)
+    |> List.concat([is_positive_byte])
+    |> List.concat(count_bytes)
+
+encode_u64_le : U64 -> List U8
+encode_u64_le = |n|
+    List.range({ start: At(0), end: Before(8) })
+    |> List.map(|i|
+        Num.int_cast(Num.shift_right_zf_by(n, Num.int_cast(i) * 8) |> Num.bitwise_and(0xFF)))
+
+encode_u32_le : U32 -> List U8
+encode_u32_le = |n|
+    List.range({ start: At(0), end: Before(4) })
+    |> List.map(|i|
+        Num.int_cast(Num.shift_right_zf_by(n, Num.int_cast(i) * 8) |> Num.bitwise_and(0xFF)))
 
 ## Encode a PersistCommand to bytes for the host.
 ## Format: [tag:U8] [qid_len:U16LE] [qid_bytes...] [data...]
