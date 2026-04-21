@@ -13,6 +13,7 @@ module [
     lookup_query,
     cancel_standing_query,
     buffer_sq_result,
+    drain_sq_results,
     broadcast_update_standing_queries,
     all_node_ids,
 ]
@@ -259,6 +260,18 @@ buffer_sq_result = |@ShardState(s), result|
     else
         { state: new_state, effect: Err(NoEffect) }
 
+## Drain all results from the SQ result buffer and return them.
+## Clears the buffer and resets backpressure to Clear if it was SqBufferFull.
+drain_sq_results : ShardState -> { state : ShardState, results : List StandingQueryResult }
+drain_sq_results = |@ShardState(s)|
+    results = s.sq_result_buffer
+    new_backpressure =
+        when s.backpressure is
+            SqBufferFull -> Clear
+            other -> other
+    new_state = @ShardState({ s & sq_result_buffer: [], backpressure: new_backpressure })
+    { state: new_state, results }
+
 ## Generate CreateSqSubscription messages for all awake nodes for all running queries.
 ##
 ## Called after a new SQ is registered or an existing one is cancelled.
@@ -413,3 +426,19 @@ expect
             SendToNode(_) -> Bool.true
             _ -> Bool.false)
     send_count == 2
+
+expect
+    # drain_sq_results returns buffered results and clears the buffer
+    shard = new(0, 4, default_config)
+    result1 : StandingQueryResult
+    result1 = { is_positive_match: Bool.true, data: Dict.empty({}) }
+    result2 : StandingQueryResult
+    result2 = { is_positive_match: Bool.false, data: Dict.empty({}) }
+    out1 = buffer_sq_result(shard, result1)
+    out2 = buffer_sq_result(out1.state, result2)
+    drained = drain_sq_results(out2.state)
+    has_two = List.len(drained.results) == 2
+    is_empty =
+        when drained.state is
+            @ShardState(s) -> List.is_empty(s.sq_result_buffer)
+    has_two && is_empty
