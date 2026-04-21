@@ -1,5 +1,6 @@
 package [
     Codec,
+    SqStateCodec,
 ] {
     id: "../../core/id/main.roc",
     model: "../../core/model/main.roc",
