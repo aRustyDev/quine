@@ -13,6 +13,7 @@ pub struct PlatformConfig {
     pub lru_check_interval_ms: u64,
     pub persistence_pool_size: u32,
     pub api_port: u16,
+    pub data_dir: String,
 }
 
 impl Default for PlatformConfig {
@@ -23,6 +24,7 @@ impl Default for PlatformConfig {
             lru_check_interval_ms: 10_000,
             persistence_pool_size: 2,
             api_port: 8080,
+            data_dir: "quine-data".into(),
         }
     }
 }

@@ -39,6 +39,13 @@ fn main() {
     // Store registry globally for roc_fx_send_to_shard
     roc_glue::set_channel_registry(registry);
 
+    // Open redb database for persistent storage.
+    let data_dir = std::path::Path::new(&config.data_dir);
+    std::fs::create_dir_all(data_dir).expect("Failed to create data directory");
+    let db_path = data_dir.join("quine.redb");
+    let db = persistence_io::open_database(&db_path);
+    eprintln!("persistence: opened {}", db_path.display());
+
     // Start persistence I/O pool on a dedicated tokio runtime thread.
     // Must be set up before shard workers start (workers call persist_async!).
     let persist_senders: Vec<_> = {
@@ -54,7 +61,7 @@ fn main() {
                 .enable_all()
                 .build()
                 .expect("Failed to create tokio runtime for persistence");
-            let _cmd_tx = persistence_io::start_persistence_pool(persist_senders, &rt);
+            let _cmd_tx = persistence_io::start_persistence_pool(persist_senders, &rt, db);
             // Store the command sender globally before blocking
             roc_glue::set_persist_sender(_cmd_tx);
             rt.block_on(std::future::pending::<()>());

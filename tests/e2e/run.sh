@@ -32,7 +32,7 @@ assert_status "register standing query" "true" "$([ -n "$SQ_ID" ] && echo true |
 # 3. Start file ingest
 STATUS=$(curl -so /dev/null -w '%{http_code}' -X POST "$BASE/ingest" \
   -H "Content-Type: application/json" \
-  -d '{"name":"test-ingest","type":"file","path":"/data/test-events.jsonl"}')
+  -d '{"name":"test-ingest","type":"file","path":"/test-data/test-events.jsonl"}')
 assert_status "start ingest returns 201" "201" "$STATUS"
 
 # 4. Wait for ingest completion (poll up to 15s)

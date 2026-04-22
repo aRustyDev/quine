@@ -58,7 +58,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=rust-builder /build/platform/target/release/quine-graph-platform /usr/local/bin/quine-roc
 
+RUN mkdir -p /data
+VOLUME /data
+
 EXPOSE 8080
+
+ENV QUINE_DATA_DIR=/data
 
 ENTRYPOINT ["quine-roc"]
 CMD ["--shards", "4", "--port", "8080"]
