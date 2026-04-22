@@ -4,6 +4,7 @@ mod api;
 mod channels;
 mod codec;
 mod config;
+mod cypher;
 mod effects;
 pub mod ingest;
 mod persistence_io;
