@@ -150,6 +150,49 @@ fn parse_edge_mutation(obj: &serde_json::Value, is_add: bool) -> Result<Mutation
 }
 
 // ============================================================
+// Shared line processing
+// ============================================================
+
+#[derive(Debug, PartialEq)]
+pub enum LineOutcome {
+    Processed,
+    Skipped,
+    Failed(String),
+    Cancelled,
+}
+
+/// Process a single JSONL line: parse, route to the correct shard, send with
+/// backpressure retry. Empty/whitespace-only lines are skipped.
+///
+/// Shared by file ingest, inline ingest, and stdin ingest.
+pub fn process_line(
+    line: &str,
+    registry: &ChannelRegistry,
+    shard_count: u32,
+    cancel: &AtomicBool,
+) -> LineOutcome {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return LineOutcome::Skipped;
+    }
+
+    match parse_jsonl_line_with_shards(trimmed, shard_count) {
+        Ok((target_shard, msg)) => {
+            loop {
+                if registry.try_send(target_shard, msg.clone()) {
+                    return LineOutcome::Processed;
+                }
+                if cancel.load(Ordering::Relaxed) {
+                    return LineOutcome::Cancelled;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        Err(e) => LineOutcome::Failed(e),
+    }
+}
+
+// ============================================================
 // Ingest Job Execution
 // ============================================================
 
@@ -210,31 +253,19 @@ fn run_ingest(
             }
         };
 
-        // Skip empty lines
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        match parse_jsonl_line_with_shards(trimmed, shard_count) {
-            Ok((target_shard, msg)) => {
-                // Backpressure: retry with short sleep if channel is full
-                loop {
-                    if registry.try_send(target_shard, msg.clone()) {
-                        break;
-                    }
-                    if cancel.load(Ordering::Relaxed) {
-                        *job.status.lock().unwrap() = IngestStatus::Cancelled;
-                        *job.completed_at.lock().unwrap() = Some(Instant::now());
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+        match process_line(&line, registry, shard_count, &cancel) {
+            LineOutcome::Processed => {
                 job.records_processed.fetch_add(1, Ordering::Relaxed);
             }
-            Err(e) => {
+            LineOutcome::Skipped => {}
+            LineOutcome::Failed(e) => {
                 eprintln!("ingest {}: parse error: {}", job.name, e);
                 job.records_failed.fetch_add(1, Ordering::Relaxed);
+            }
+            LineOutcome::Cancelled => {
+                *job.status.lock().unwrap() = IngestStatus::Cancelled;
+                *job.completed_at.lock().unwrap() = Some(Instant::now());
+                return;
             }
         }
     }
@@ -379,5 +410,48 @@ mod tests {
         }
         // Verify the registry was created without panic
         assert_eq!(registry.shard_count(), 4);
+    }
+
+    // ---- process_line tests ----
+
+    #[test]
+    fn process_line_valid_record() {
+        let registry = ChannelRegistry::new(4, 64);
+        let cancel = AtomicBool::new(false);
+        let line = r#"{"type":"set_prop","node_id":"alice","key":"name","value":"Alice"}"#;
+        assert_eq!(process_line(line, &registry, 4, &cancel), LineOutcome::Processed);
+    }
+
+    #[test]
+    fn process_line_empty_skipped() {
+        let registry = ChannelRegistry::new(4, 64);
+        let cancel = AtomicBool::new(false);
+        assert_eq!(process_line("", &registry, 4, &cancel), LineOutcome::Skipped);
+        assert_eq!(process_line("   ", &registry, 4, &cancel), LineOutcome::Skipped);
+        assert_eq!(process_line("\t\n", &registry, 4, &cancel), LineOutcome::Skipped);
+    }
+
+    #[test]
+    fn process_line_bad_json_fails() {
+        let registry = ChannelRegistry::new(4, 64);
+        let cancel = AtomicBool::new(false);
+        match process_line("not json", &registry, 4, &cancel) {
+            LineOutcome::Failed(_) => {}
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn process_line_cancelled() {
+        let registry = ChannelRegistry::new(1, 1); // capacity 1
+        let cancel = AtomicBool::new(false);
+        let line = r#"{"type":"set_prop","node_id":"a","key":"k","value":1}"#;
+
+        // Fill the channel
+        assert_eq!(process_line(line, &registry, 1, &cancel), LineOutcome::Processed);
+
+        // Now set cancel and try again — should detect cancel during backpressure
+        cancel.store(true, Ordering::Relaxed);
+        assert_eq!(process_line(line, &registry, 1, &cancel), LineOutcome::Cancelled);
     }
 }
