@@ -167,6 +167,9 @@ lex_string = |bytes, pos, collected, acc|
                     Ok(escaped) if escaped == 't' ->
                         lex_string(bytes, pos + 2, List.append(collected, '\t'), acc)
 
+                    Ok(escaped) if escaped == 'r' ->
+                        lex_string(bytes, pos + 2, List.append(collected, '\r'), acc)
+
                     _ ->
                         # Unknown escape — include the backslash and move on
                         lex_string(bytes, pos + 1, List.append(collected, byte), acc)
