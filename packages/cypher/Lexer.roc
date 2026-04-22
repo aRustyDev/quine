@@ -501,3 +501,62 @@ expect
     when lex("MATCH (n)") is
         Ok([KwMatch, LParen, Ident("n"), RParen, Eof]) -> Bool.true
         _ -> Bool.false
+
+# Edge tokens — ] is always RBracket; parser assembles edge direction
+# -[ ... ]->  =  DashBracket ... RBracket DashArrowRight  (outgoing)
+# <-[ ... ]-  =  LeftArrowDash LBracket ... RBracket Dash (incoming)
+# -[ ... ]-   =  DashBracket ... RBracket Dash            (undirected)
+
+# Outgoing edge: -[:KNOWS]->
+expect
+    when lex("-[:KNOWS]->") is
+        Ok([DashBracket, Colon, Ident("knows"), RBracket, DashArrowRight, Eof]) -> Bool.true
+        _ -> Bool.false
+
+# Incoming edge: <-[:KNOWS]-
+expect
+    when lex("<-[:KNOWS]-") is
+        Ok([LeftArrowDash, LBracket, Colon, Ident("knows"), RBracket, Dash, Eof]) -> Bool.true
+        _ -> Bool.false
+
+# Undirected edge: -[:KNOWS]-
+expect
+    when lex("-[:KNOWS]-") is
+        Ok([DashBracket, Colon, Ident("knows"), RBracket, Dash, Eof]) -> Bool.true
+        _ -> Bool.false
+
+# Untyped edge: -[]->
+expect
+    when lex("-[]->(b)") is
+        Ok([DashBracket, RBracket, DashArrowRight, LParen, Ident("b"), RParen, Eof]) -> Bool.true
+        _ -> Bool.false
+
+# Full query 1: MATCH (n) WHERE n.name = "Alice" RETURN n
+expect
+    when lex("MATCH (n) WHERE n.name = \"Alice\" RETURN n") is
+        Ok([KwMatch, LParen, Ident("n"), RParen, KwWhere, Ident("n"), Dot, Ident("name"), OpEq, LitStr("Alice"), KwReturn, Ident("n"), Eof]) -> Bool.true
+        _ -> Bool.false
+
+# Full query 2: MATCH (n:Person) WHERE n.age > 25 RETURN n.name, n.age
+expect
+    when lex("MATCH (n:Person) WHERE n.age > 25 RETURN n.name, n.age") is
+        Ok([KwMatch, LParen, Ident("n"), Colon, Ident("person"), RParen, KwWhere, Ident("n"), Dot, Ident("age"), OpGt, LitInt(25), KwReturn, Ident("n"), Dot, Ident("name"), Comma, Ident("n"), Dot, Ident("age"), Eof]) -> Bool.true
+        _ -> Bool.false
+
+# Full query 3: MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name
+expect
+    when lex("MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name") is
+        Ok([KwMatch, LParen, Ident("a"), RParen, DashBracket, Colon, Ident("knows"), RBracket, DashArrowRight, LParen, Ident("b"), RParen, KwReturn, Ident("a"), Dot, Ident("name"), Comma, Ident("b"), Dot, Ident("name"), Eof]) -> Bool.true
+        _ -> Bool.false
+
+# Error: unclosed string
+expect
+    when lex("\"unterminated") is
+        Err(_) -> Bool.true
+        _ -> Bool.false
+
+# Error: unexpected character
+expect
+    when lex("@") is
+        Err(_) -> Bool.true
+        _ -> Bool.false
