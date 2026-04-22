@@ -1,4 +1,4 @@
-hosted [send_to_shard!, persist_async!, current_time!, log!, emit_sq_result!]
+hosted [send_to_shard!, persist_async!, current_time!, log!, emit_sq_result!, reply!]
 
 ## Send a message to a shard's input channel.
 ## Returns 0 on success, 1 if the channel is full.
@@ -19,3 +19,7 @@ log! : U8, Str => {}
 ## Encodes query_id as U128 (16 bytes LE) + is_positive_match (1 byte) + data payload.
 ## Returns 0 on success, 1 if the result buffer is full (backpressure).
 emit_sq_result! : List U8 => U8
+
+## Send a reply to a pending request (node query).
+## The host routes the payload to the waiting HTTP handler via request_id.
+reply! : U64, List U8 => {}

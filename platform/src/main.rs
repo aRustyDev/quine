@@ -1,5 +1,6 @@
 // platform/src/main.rs
 
+mod api;
 mod channels;
 mod codec;
 mod config;
@@ -65,8 +66,8 @@ fn main() {
 
     // Start SQ result channel for standing query output.
     // Bounded channel with capacity matching the default SQ config buffer size.
-    // Consumers (Phase 6 output sinks) will read from the receiver.
-    let (sq_result_tx, _sq_result_rx) = crossbeam_channel::bounded::<Vec<u8>>(1024);
+    // The receiver is passed to the REST API for draining results.
+    let (sq_result_tx, sq_result_rx) = crossbeam_channel::bounded::<Vec<u8>>(1024);
     roc_glue::set_sq_result_sender(sq_result_tx);
 
     // Spawn one worker thread per shard
@@ -101,9 +102,44 @@ fn main() {
         })
         .expect("failed to spawn timer runtime thread");
 
+    // Build shared application state for the REST API.
+    let app_state = std::sync::Arc::new(api::AppState {
+        channel_registry: roc_glue::channel_registry(),
+        ingest_jobs: ingest::new_registry(),
+        sq_registry: api::new_sq_registry(),
+        sq_result_rx,
+        pending_requests: api::new_pending_requests(),
+        shard_count: config.shard_count,
+        start_time: std::time::Instant::now(),
+    });
+
+    // Store pending_requests globally for roc_fx_reply
+    roc_glue::set_pending_requests(app_state.pending_requests.clone());
+
+    // Start axum REST API server
+    let api_port = config.api_port;
+    let api_state = app_state;
+    let _api_thread = std::thread::Builder::new()
+        .name("api-server".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime for API server");
+            rt.block_on(async {
+                let app = api::api_routes(api_state);
+                let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", api_port))
+                    .await
+                    .expect("Failed to bind API server");
+                eprintln!("REST API listening on 0.0.0.0:{}", api_port);
+                axum::serve(listener, app).await.expect("API server error");
+            });
+        })
+        .expect("failed to spawn API server thread");
+
     eprintln!(
-        "quine-graph platform running: {} shard workers, timers every {}ms",
-        config.shard_count, config.lru_check_interval_ms
+        "quine-graph platform running: {} shard workers, timers every {}ms, API on port {}",
+        config.shard_count, config.lru_check_interval_ms, api_port
     );
 
     // Keep main thread alive until all workers finish.
@@ -135,6 +171,12 @@ fn parse_config() -> PlatformConfig {
                 i += 1;
                 if let Some(n) = args.get(i) {
                     config.lru_check_interval_ms = n.parse().expect("--timer-interval must be a number");
+                }
+            }
+            "--port" => {
+                i += 1;
+                if let Some(n) = args.get(i) {
+                    config.api_port = n.parse().expect("--port must be a number");
                 }
             }
             _ => {}

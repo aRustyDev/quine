@@ -7,6 +7,8 @@ module [
     decode_u32,
     encode_node_snapshot,
     decode_node_snapshot,
+    encode_property_value,
+    encode_half_edge,
 ]
 
 import id.QuineId exposing [QuineId]

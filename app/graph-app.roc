@@ -143,14 +143,14 @@ drain_effects! = |state|
 execute_effect! : Effect => {}
 execute_effect! = |effect|
     when effect is
-        Reply({ request_id, payload: _ }) ->
-            Effect.log!(3, "graph-app: reply for request $(Num.to_str(request_id)) (routing deferred)")
+        Reply({ request_id, payload }) ->
+            encoded = encode_reply_payload(payload)
+            Effect.reply!(request_id, encoded)
 
         SendToNode({ target, msg }) ->
             target_shard = Routing.shard_for_node(target, shard_count)
             envelope = Codec.encode_shard_envelope(target, msg)
-            payload = List.concat([tag_shard_msg], envelope)
-            when Effect.send_to_shard!(target_shard, payload) is
+            when Effect.send_to_shard!(target_shard, envelope) is
                 Ok({}) -> {}
                 Err(ChannelFull) ->
                     Effect.log!(1, "graph-app: channel full sending to shard $(Num.to_str(target_shard))")
@@ -182,6 +182,51 @@ execute_effect! = |effect|
                     Effect.log!(3, "graph-app: SQ result $(is_pos) for query $(Num.to_str(query_id))")
                 Err(SqBufferFull) ->
                     Effect.log!(1, "graph-app: SQ result buffer full for query $(Num.to_str(query_id))")
+
+## Encode a ReplyPayload to bytes for the host's reply! function.
+##
+## Props format: [prop_count:U32LE] repeated: [key_len:U16LE][key...][value_bytes...]
+##               [edge_count:U32LE=0]
+## Ack format: [prop_count:U32LE=0][edge_count:U32LE=0]
+## Err format: [prop_count:U32LE=0][edge_count:U32LE=0] (error text discarded for now)
+encode_reply_payload : [Props (Dict Str _), Edges (List _), Ack, Err Str] -> List U8
+encode_reply_payload = |payload|
+    when payload is
+        Props(props) ->
+            prop_count = Dict.len(props) |> Num.to_u32
+            header = encode_u32_le(prop_count)
+            prop_bytes = Dict.walk(props, [], |acc, key, val|
+                key_bytes = Str.to_utf8(key)
+                key_len_bytes = encode_u16_le(Num.to_u16(List.len(key_bytes)))
+                val_bytes = Codec.encode_property_value(val)
+                acc
+                |> List.concat(key_len_bytes)
+                |> List.concat(key_bytes)
+                |> List.concat(val_bytes))
+            edge_count = encode_u32_le(0u32)
+            header
+            |> List.concat(prop_bytes)
+            |> List.concat(edge_count)
+
+        Edges(edges) ->
+            prop_count = encode_u32_le(0u32)
+            edge_count = List.len(edges) |> Num.to_u32 |> encode_u32_le
+            edge_bytes = List.walk(edges, [], |acc, edge|
+                List.concat(acc, Codec.encode_half_edge(edge)))
+            prop_count
+            |> List.concat(edge_count)
+            |> List.concat(edge_bytes)
+
+        Ack ->
+            List.concat(encode_u32_le(0u32), encode_u32_le(0u32))
+
+        Err(_) ->
+            List.concat(encode_u32_le(0u32), encode_u32_le(0u32))
+
+encode_u16_le : U16 -> List U8
+encode_u16_le = |n|
+    [Num.int_cast(Num.bitwise_and(n, 0xFF)),
+     Num.int_cast(Num.shift_right_zf_by(n, 8))]
 
 ## Encode a StandingQueryResult for the host's emit_sq_result! function.
 ## Format: [query_id_lo:U64LE] [query_id_hi:U64LE] [is_positive:U8] [pair_count:U32LE]

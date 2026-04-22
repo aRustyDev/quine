@@ -1,6 +1,6 @@
 ## Public effect API for apps running on the quine-graph platform.
 ## Apps import this module to call host-provided functions.
-module [send_to_shard!, persist_async!, current_time!, log!, emit_sq_result!]
+module [send_to_shard!, persist_async!, current_time!, log!, emit_sq_result!, reply!]
 
 import Host
 
@@ -41,3 +41,9 @@ emit_sq_result! = |payload|
         Ok({})
     else
         Err(SqBufferFull)
+
+## Send a reply to a pending request (node query response).
+## The host routes the payload back to the waiting HTTP handler.
+reply! : U64, List U8 => {}
+reply! = |request_id, payload|
+    Host.reply!(request_id, payload)

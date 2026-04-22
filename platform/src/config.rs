@@ -6,6 +6,7 @@ pub struct PlatformConfig {
     pub channel_capacity: usize,
     pub lru_check_interval_ms: u64,
     pub persistence_pool_size: u32,
+    pub api_port: u16,
 }
 
 impl Default for PlatformConfig {
@@ -15,6 +16,7 @@ impl Default for PlatformConfig {
             channel_capacity: 4096,
             lru_check_interval_ms: 10_000,
             persistence_pool_size: 2,
+            api_port: 8080,
         }
     }
 }

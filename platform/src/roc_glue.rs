@@ -222,6 +222,20 @@ pub fn sq_result_sender() -> Option<&'static crossbeam_channel::Sender<Vec<u8>>>
 }
 
 // ============================================================
+// Global pending requests — used by roc_fx_reply.
+// ============================================================
+
+static PENDING_REQUESTS: OnceLock<crate::api::PendingRequests> = OnceLock::new();
+
+/// Set the global pending requests map. Must be called before any Roc code
+/// that uses reply!.
+pub fn set_pending_requests(pending: crate::api::PendingRequests) {
+    if PENDING_REQUESTS.set(pending).is_err() {
+        panic!("Pending requests already initialized");
+    }
+}
+
+// ============================================================
 // Host-provided effect functions — Roc calls these via roc_fx_*.
 //
 // Calling convention (verified from Zig host and nm output):
@@ -247,6 +261,7 @@ pub fn init() {
         roc_fx_send_to_shard as _,
         roc_fx_persist_async as _,
         roc_fx_emit_sq_result as _,
+        roc_fx_reply as _,
     ];
     #[allow(forgetting_references)]
     std::mem::forget(std::hint::black_box(funcs));
@@ -356,5 +371,23 @@ pub extern "C" fn roc_fx_emit_sq_result(payload: &RocList<u8>) -> u8 {
         // No consumer registered — succeed silently (results are dropped).
         // Normal during tests or when no output sinks are configured.
         0
+    }
+}
+
+/// Send a reply payload to a pending request (from a node query).
+/// Roc signature: reply! : U64, List U8 => {}
+/// Called from the shard worker thread when a Reply effect is executed.
+/// Looks up the oneshot sender by request_id and completes it.
+#[no_mangle]
+pub extern "C" fn roc_fx_reply(request_id: u64, payload: &RocList<u8>) {
+    if let Some(pending) = PENDING_REQUESTS.get() {
+        let sender = {
+            let mut map = pending.lock().unwrap();
+            map.remove(&request_id)
+        };
+        if let Some(tx) = sender {
+            let bytes = payload.as_slice().to_vec();
+            let _ = tx.send(bytes); // receiver may have timed out — ignore error
+        }
     }
 }
