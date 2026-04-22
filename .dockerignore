@@ -1,0 +1,43 @@
+# Build artifacts
+platform/target/
+platform/libapp.a
+platform/libapp.dylib
+platform/libapp.so
+platform/app.o
+
+# Git
+.git
+.gitignore
+
+# IDE / editor
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+
+# Scala/JVM (original Quine codebase — not needed for Roc build)
+target/
+project/target/
+project/project/
+.bloop
+.bsp
+.metals
+node_modules/
+*.jar
+*.class
+
+# CI / config
+.github
+.dolt
+.beads*
+.claude
+.serena
+.playwright-mcp
+
+# Docs
+docs/
+*.md
+
+# Test artifacts
+metrics-logs
