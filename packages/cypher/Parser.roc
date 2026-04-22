@@ -276,10 +276,143 @@ parse_value_literal = |state|
         _ -> Err({ message: "expected a literal value", position: state.pos, context: "value literal" })
 
 ## Parse an optional WHERE clause.
-## For now always returns NoWhere (WHERE parsing is Task 7).
+## If the next token is WHERE, consume it and parse an OR-level expression.
+## Otherwise return NoWhere without consuming any tokens.
 parse_optional_where : State -> Result ([Where Expr, NoWhere], State) ParseError
 parse_optional_where = |state|
-    Ok((NoWhere, state))
+    if token_matches(peek(state), KwWhere) then
+        state1 = advance(state)
+        (expr, state2) = parse_or_expr(state1)?
+        Ok((Where(expr), state2))
+    else
+        Ok((NoWhere, state))
+
+## Parse an OR-level boolean expression (loosest binding).
+## `a OR b OR c` → left-associative BoolOp chain.
+parse_or_expr : State -> Result (Expr, State) ParseError
+parse_or_expr = |state|
+    (left, state1) = parse_and_expr(state)?
+    parse_or_expr_rest(state1, left)
+
+parse_or_expr_rest : State, Expr -> Result (Expr, State) ParseError
+parse_or_expr_rest = |state, left|
+    if token_matches(peek(state), KwOr) then
+        state1 = advance(state)
+        (right, state2) = parse_and_expr(state1)?
+        combined = BoolOp({ left, op: Or, right })
+        parse_or_expr_rest(state2, combined)
+    else
+        Ok((left, state))
+
+## Parse an AND-level boolean expression.
+## `a AND b AND c` → left-associative BoolOp chain.
+parse_and_expr : State -> Result (Expr, State) ParseError
+parse_and_expr = |state|
+    (left, state1) = parse_comparison(state)?
+    parse_and_expr_rest(state1, left)
+
+parse_and_expr_rest : State, Expr -> Result (Expr, State) ParseError
+parse_and_expr_rest = |state, left|
+    if token_matches(peek(state), KwAnd) then
+        state1 = advance(state)
+        (right, state2) = parse_comparison(state1)?
+        combined = BoolOp({ left, op: And, right })
+        parse_and_expr_rest(state2, combined)
+    else
+        Ok((left, state))
+
+## Parse a comparison or IS NULL / IS NOT NULL expression.
+## Forms:
+##   atom op value        → Comparison { left: atom, op, right: value }
+##   atom IS NULL         → IsNull(atom)
+##   atom IS NOT NULL     → Not(IsNull(atom))
+##   atom                 → atom (no operator follows)
+parse_comparison : State -> Result (Expr, State) ParseError
+parse_comparison = |state|
+    (atom, state1) = parse_atom(state)?
+    tok = peek(state1)
+    when tok is
+        OpEq ->
+            state2 = advance(state1)
+            (right, state3) = parse_expr_value(state2)?
+            Ok((Comparison({ left: atom, op: Eq, right }), state3))
+
+        OpNeq ->
+            state2 = advance(state1)
+            (right, state3) = parse_expr_value(state2)?
+            Ok((Comparison({ left: atom, op: Neq, right }), state3))
+
+        OpLt ->
+            state2 = advance(state1)
+            (right, state3) = parse_expr_value(state2)?
+            Ok((Comparison({ left: atom, op: Lt, right }), state3))
+
+        OpGt ->
+            state2 = advance(state1)
+            (right, state3) = parse_expr_value(state2)?
+            Ok((Comparison({ left: atom, op: Gt, right }), state3))
+
+        OpLte ->
+            state2 = advance(state1)
+            (right, state3) = parse_expr_value(state2)?
+            Ok((Comparison({ left: atom, op: Lte, right }), state3))
+
+        OpGte ->
+            state2 = advance(state1)
+            (right, state3) = parse_expr_value(state2)?
+            Ok((Comparison({ left: atom, op: Gte, right }), state3))
+
+        KwIs ->
+            # IS NULL or IS NOT NULL
+            state2 = advance(state1)
+            if token_matches(peek(state2), KwNot) then
+                state3 = advance(state2)
+                state4 = expect_kw(state3, KwNull, "expected NULL after IS NOT")?
+                Ok((Not(IsNull(atom)), state4))
+            else
+                state3 = expect_kw(state2, KwNull, "expected NULL after IS")?
+                Ok((IsNull(atom), state3))
+
+        _ ->
+            Ok((atom, state1))
+
+## Parse an atomic predicate operand.
+## Currently handles `alias.prop` → Property { expr: Variable(alias), key: prop }.
+parse_atom : State -> Result (Expr, State) ParseError
+parse_atom = |state|
+    when peek(state) is
+        Ident(alias) ->
+            state1 = advance(state)
+            when peek(state1) is
+                Dot ->
+                    state2 = advance(state1)
+                    when peek(state2) is
+                        Ident(prop) ->
+                            state3 = advance(state2)
+                            Ok((Property({ expr: Variable(alias), key: prop }), state3))
+
+                        _ ->
+                            Err({ message: "expected property name after '.'", position: state2.pos, context: "WHERE atom" })
+
+                _ ->
+                    Ok((Variable(alias), state1))
+
+        _ ->
+            Err({ message: "expected identifier in WHERE predicate", position: state.pos, context: "WHERE atom" })
+
+## Parse a literal value on the RHS of a comparison.
+## Produces an Expr (Literal wrapping a QuineValue).
+parse_expr_value : State -> Result (Expr, State) ParseError
+parse_expr_value = |state|
+    tok = peek(state)
+    when tok is
+        LitStr(s) -> Ok((Literal(Str(s)), advance(state)))
+        LitInt(n) -> Ok((Literal(Integer(n)), advance(state)))
+        LitFloat(f) -> Ok((Literal(Floating(f)), advance(state)))
+        KwTrue -> Ok((Literal(True), advance(state)))
+        KwFalse -> Ok((Literal(False), advance(state)))
+        KwNull -> Ok((Literal(Null), advance(state)))
+        _ -> Err({ message: "expected a literal value in comparison", position: state.pos, context: "WHERE value" })
 
 ## Parse a comma-separated list of RETURN items.
 parse_return_items : State -> Result (List ReturnItem, State) ParseError
@@ -508,4 +641,71 @@ expect
                     && step.edge.edge_type == Typed("KNOWS")
                     && step.edge.direction == Outgoing
                 _ -> Bool.false
+        _ -> Bool.false
+
+# WHERE with simple equality comparison
+expect
+    when parse_cypher("MATCH (n) WHERE n.name = \"Alice\" RETURN n") is
+        Ok(q) ->
+            when q.where_ is
+                Where(Comparison(c)) -> c.op == Eq
+                _ -> Bool.false
+        _ -> Bool.false
+
+# WHERE with integer greater-than comparison
+expect
+    when parse_cypher("MATCH (n:Person) WHERE n.age > 25 RETURN n.name, n.age") is
+        Ok(q) ->
+            when q.where_ is
+                Where(Comparison(c)) -> c.op == Gt
+                _ -> Bool.false
+        _ -> Bool.false
+
+# WHERE with AND
+expect
+    when parse_cypher("MATCH (n) WHERE n.age > 25 AND n.name = \"Alice\" RETURN n") is
+        Ok(q) ->
+            when q.where_ is
+                Where(BoolOp(b)) -> b.op == And
+                _ -> Bool.false
+        _ -> Bool.false
+
+# WHERE with OR
+expect
+    when parse_cypher("MATCH (n) WHERE n.age < 18 OR n.age > 65 RETURN n") is
+        Ok(q) ->
+            when q.where_ is
+                Where(BoolOp(b)) -> b.op == Or
+                _ -> Bool.false
+        _ -> Bool.false
+
+# WHERE with IS NULL
+expect
+    when parse_cypher("MATCH (n) WHERE n.email IS NULL RETURN n") is
+        Ok(q) ->
+            when q.where_ is
+                Where(IsNull(_)) -> Bool.true
+                _ -> Bool.false
+        _ -> Bool.false
+
+# WHERE with IS NOT NULL
+expect
+    when parse_cypher("MATCH (n) WHERE n.email IS NOT NULL RETURN n") is
+        Ok(q) ->
+            when q.where_ is
+                Where(Not(IsNull(_))) -> Bool.true
+                _ -> Bool.false
+        _ -> Bool.false
+
+# Filtered traversal
+expect
+    when parse_cypher("MATCH (a)-[:KNOWS]->(b) WHERE a.name = \"Alice\" RETURN b") is
+        Ok(q) ->
+            is_comparison =
+                when q.where_ is
+                    Where(Comparison(_)) -> Bool.true
+                    _ -> Bool.false
+            is_single_return =
+                q.return_items == [WholeAlias("b")]
+            List.len(q.pattern.steps) == 1 && is_comparison && is_single_return
         _ -> Bool.false
