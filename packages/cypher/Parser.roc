@@ -4,7 +4,7 @@ module [
 ]
 
 import Token exposing [Token]
-import Ast exposing [CypherQuery, Pattern, NodePattern, ReturnItem, ParseError]
+import Ast exposing [CypherQuery, Pattern, NodePattern, EdgePattern, ReturnItem, ParseError]
 import Lexer exposing [lex]
 import expr.Expr exposing [Expr]
 import model.QuineValue exposing [QuineValue]
@@ -84,12 +84,104 @@ expect_eof = |state|
         Eof -> Ok(state)
         _ -> Err({ message: "expected end of input", position: state.pos, context: "parser" })
 
-## Parse a graph pattern.
-## For now only parses the start node (no edge steps yet — Task 6).
+## Parse a graph pattern: start node followed by zero or more (edge, node) steps.
+## Handles `(a)-[:KNOWS]->(b)-[:FOLLOWS]->(c)` and variants.
 parse_pattern : State -> Result (Pattern, State) ParseError
 parse_pattern = |state|
-    (node, state1) = parse_node_pattern(state)?
-    Ok(({ start: node, steps: [] }, state1))
+    (start, state1) = parse_node_pattern(state)?
+    (steps, state2) = parse_pattern_steps(state1, [])?
+    Ok(({ start, steps }, state2))
+
+## Recursive helper: consume (edge, node) pairs as long as an edge token is present.
+parse_pattern_steps : State, List { edge : EdgePattern, node : NodePattern } -> Result (List { edge : EdgePattern, node : NodePattern }, State) ParseError
+parse_pattern_steps = |state, acc|
+    tok = peek(state)
+    if token_matches(tok, DashBracket) || token_matches(tok, LeftArrowDash) then
+        (edge, state1) = parse_edge_pattern(state)?
+        (node, state2) = parse_node_pattern(state1)?
+        parse_pattern_steps(state2, List.append(acc, { edge, node }))
+    else
+        Ok((acc, state))
+
+## Parse one edge pattern.
+##
+## Outgoing / undirected (starts with `-[`):
+##   DashBracket  [alias]  [: Type]  RBracket  (DashArrowRight | Dash)
+##
+## Incoming (starts with `<-`):
+##   LeftArrowDash  LBracket  [alias]  [: Type]  RBracket  Dash
+parse_edge_pattern : State -> Result (EdgePattern, State) ParseError
+parse_edge_pattern = |state|
+    tok = peek(state)
+    if token_matches(tok, DashBracket) then
+        parse_edge_outgoing_or_undirected(state)
+    else if token_matches(tok, LeftArrowDash) then
+        parse_edge_incoming(state)
+    else
+        Err({ message: "expected '-[' or '<-' to start edge pattern", position: state.pos, context: "edge pattern" })
+
+## Parse `-[alias:Type]->` (Outgoing) or `-[alias:Type]-` (Undirected).
+parse_edge_outgoing_or_undirected : State -> Result (EdgePattern, State) ParseError
+parse_edge_outgoing_or_undirected = |state|
+    # consume `-[`
+    state1 = advance(state)
+
+    # optional alias
+    (alias, state2) =
+        when peek(state1) is
+            Ident(name) -> (Named(name), advance(state1))
+            _ -> (Anon, state1)
+
+    # optional `: Type`
+    (edge_type, state3) = parse_edge_type(state2)?
+
+    # expect `]`
+    state4 = expect_kw(state3, RBracket, "expected ']' to close edge pattern")?
+
+    # expect `->` or `-`
+    when peek(state4) is
+        DashArrowRight -> Ok(({ alias, edge_type, direction: Outgoing }, advance(state4)))
+        Dash -> Ok(({ alias, edge_type, direction: Undirected }, advance(state4)))
+        _ -> Err({ message: "expected '->' or '-' after edge pattern", position: state4.pos, context: "edge pattern" })
+
+## Parse `<-[alias:Type]-` (Incoming).
+parse_edge_incoming : State -> Result (EdgePattern, State) ParseError
+parse_edge_incoming = |state|
+    # consume `<-`
+    state1 = advance(state)
+
+    # expect `[`
+    state2 = expect_kw(state1, LBracket, "expected '[' after '<-'")?
+
+    # optional alias
+    (alias, state3) =
+        when peek(state2) is
+            Ident(name) -> (Named(name), advance(state2))
+            _ -> (Anon, state2)
+
+    # optional `: Type`
+    (edge_type, state4) = parse_edge_type(state3)?
+
+    # expect `]`
+    state5 = expect_kw(state4, RBracket, "expected ']' to close edge pattern")?
+
+    # expect `-`
+    state6 = expect_kw(state5, Dash, "expected '-' after ']' for incoming edge")?
+
+    Ok(({ alias, edge_type, direction: Incoming }, state6))
+
+## Parse an optional `: TypeName` for an edge pattern.
+## Returns `(Typed name, state)` or `(Untyped, state)`.
+parse_edge_type : State -> Result ([Typed Str, Untyped], State) ParseError
+parse_edge_type = |state|
+    when peek(state) is
+        Colon ->
+            state1 = advance(state)
+            when peek(state1) is
+                Ident(type_name) -> Ok((Typed(type_name), advance(state1)))
+                _ -> Err({ message: "expected edge type name after ':'", position: state1.pos, context: "edge pattern" })
+
+        _ -> Ok((Untyped, state))
 
 ## Parse an optional node label (`:Label` part).
 ## Returns `(Labeled name, state)` if a colon and ident follow, or `(Unlabeled, state)` otherwise.
@@ -359,4 +451,61 @@ expect
 expect
     when parse_cypher("MATCH (n) RETURN n extra") is
         Err(_) -> Bool.true
+        _ -> Bool.false
+
+# Single hop outgoing: MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name
+expect
+    when parse_cypher("MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name") is
+        Ok(q) ->
+            List.len(q.pattern.steps) == 1
+            && q.pattern.start.alias == Named("a")
+            && List.len(q.return_items) == 2
+            && (when List.get(q.pattern.steps, 0) is
+                Ok(step) ->
+                    step.edge.edge_type == Typed("KNOWS")
+                    && step.edge.direction == Outgoing
+                    && step.node.alias == Named("b")
+                _ -> Bool.false)
+        _ -> Bool.false
+
+# Incoming edge: MATCH (a)<-[:FOLLOWS]-(b) RETURN a, b
+expect
+    when parse_cypher("MATCH (a)<-[:FOLLOWS]-(b) RETURN a, b") is
+        Ok(q) ->
+            List.len(q.pattern.steps) == 1
+            && (when List.get(q.pattern.steps, 0) is
+                Ok(step) ->
+                    step.edge.edge_type == Typed("FOLLOWS")
+                    && step.edge.direction == Incoming
+                _ -> Bool.false)
+        _ -> Bool.false
+
+# Multi-hop: MATCH (a)-[:KNOWS]->(b)-[:FOLLOWS]->(c) RETURN a.name, c.name
+expect
+    when parse_cypher("MATCH (a)-[:KNOWS]->(b)-[:FOLLOWS]->(c) RETURN a.name, c.name") is
+        Ok(q) ->
+            List.len(q.pattern.steps) == 2
+        _ -> Bool.false
+
+# Untyped edge: MATCH (a)-[]->(b) RETURN a, b
+expect
+    when parse_cypher("MATCH (a)-[]->(b) RETURN a, b") is
+        Ok(q) ->
+            when List.get(q.pattern.steps, 0) is
+                Ok(step) ->
+                    step.edge.edge_type == Untyped
+                    && step.edge.direction == Outgoing
+                _ -> Bool.false
+        _ -> Bool.false
+
+# Named edge: MATCH (a)-[r:KNOWS]->(b) RETURN a, b
+expect
+    when parse_cypher("MATCH (a)-[r:KNOWS]->(b) RETURN a, b") is
+        Ok(q) ->
+            when List.get(q.pattern.steps, 0) is
+                Ok(step) ->
+                    step.edge.alias == Named("r")
+                    && step.edge.edge_type == Typed("KNOWS")
+                    && step.edge.direction == Outgoing
+                _ -> Bool.false
         _ -> Bool.false
