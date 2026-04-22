@@ -36,6 +36,8 @@ struct SqResponse {
     query: serde_json::Value,
     status: &'static str,
     results_emitted: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shards_reached: Option<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     results: Vec<SqResultEntry>,
 }
@@ -148,18 +150,23 @@ fn encode_cancel_sq_command(query_id: u128) -> Vec<u8> {
 }
 
 /// Send a shard-level command to all shards, prepending TAG_SHARD_CMD.
-fn broadcast_to_shards(state: &AppState, payload: &[u8]) {
+/// Returns the number of shards that successfully received the command.
+fn broadcast_to_shards(state: &AppState, payload: &[u8]) -> u32 {
+    let mut success_count = 0u32;
     for shard_id in 0..state.shard_count {
         let mut msg = Vec::with_capacity(1 + payload.len());
         msg.push(TAG_SHARD_CMD);
         msg.extend_from_slice(payload);
-        if !state.channel_registry.try_send(shard_id, msg) {
+        if state.channel_registry.try_send(shard_id, msg) {
+            success_count += 1;
+        } else {
             eprintln!(
                 "standing_queries: channel full for shard {} during broadcast",
                 shard_id
             );
         }
     }
+    success_count
 }
 
 // ---- Handlers ----
@@ -184,11 +191,28 @@ async fn create_sq(
 
     // Send RegisterSq to all shards
     let create_cmd = encode_register_sq_command(query_id, req.include_cancellations, &req.query);
-    broadcast_to_shards(&state, &create_cmd);
+    let shards_reached = broadcast_to_shards(&state, &create_cmd);
 
     // Send UpdateSqs to all shards (broadcasts to awake nodes)
     let update_cmd = encode_update_sqs_command();
     broadcast_to_shards(&state, &update_cmd);
+
+    if shards_reached == 0 {
+        // No shards received the command — remove from registry and return 503
+        let mut sqs = state.sq_registry.lock().unwrap();
+        sqs.remove(&query_id);
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(SqResponse {
+                id: format!("{:032x}", query_id),
+                query: req.query,
+                status: "failed",
+                results_emitted: 0,
+                shards_reached: Some(0),
+                results: Vec::new(),
+            }),
+        );
+    }
 
     let id_str = format!("{:032x}", query_id);
     (
@@ -198,6 +222,7 @@ async fn create_sq(
             query: req.query,
             status: "running",
             results_emitted: 0,
+            shards_reached: Some(shards_reached),
             results: Vec::new(),
         }),
     )
@@ -238,6 +263,7 @@ async fn list_sqs(State(state): State<Arc<AppState>>) -> Json<Vec<SqResponse>> {
                 query: entry.query_json.clone(),
                 status: "running",
                 results_emitted: entry.results_emitted.load(Ordering::Relaxed),
+                shards_reached: None,
                 results,
             }
         })

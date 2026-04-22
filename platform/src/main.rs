@@ -27,6 +27,9 @@ fn main() {
         config.channel_capacity
     );
 
+    // Store shard count globally for roc_fx_shard_count (before workers start)
+    roc_glue::set_shard_count(config.shard_count);
+
     // Clone receivers before moving registry into the global OnceLock.
     // crossbeam Receiver is Clone (it's an Arc internally), so this is cheap.
     let receivers: Vec<_> = (0..config.shard_count)
@@ -150,7 +153,17 @@ fn main() {
 }
 
 fn parse_config() -> PlatformConfig {
-    let mut config = PlatformConfig::default();
+    use figment::providers::{Env, Format, Serialized, Toml, Yaml};
+    use figment::Figment;
+
+    // Build config with priority: CLI args > env > config file > defaults
+    let mut figment = Figment::from(Serialized::defaults(PlatformConfig::default()))
+        .merge(Toml::file("quine.toml"))
+        .merge(Yaml::file("quine.yaml"))
+        .merge(Yaml::file("quine.yml"))
+        .merge(Env::prefixed("QUINE_"));
+
+    // Parse CLI args as overrides (highest priority)
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -158,30 +171,37 @@ fn parse_config() -> PlatformConfig {
             "--shards" => {
                 i += 1;
                 if let Some(n) = args.get(i) {
-                    config.shard_count = n.parse().expect("--shards must be a number");
+                    let val: u32 = n.parse().expect("--shards must be a number");
+                    figment = figment.merge(Serialized::default("shard_count", val));
                 }
             }
             "--channel-capacity" => {
                 i += 1;
                 if let Some(n) = args.get(i) {
-                    config.channel_capacity = n.parse().expect("--channel-capacity must be a number");
+                    let val: usize = n.parse().expect("--channel-capacity must be a number");
+                    figment = figment.merge(Serialized::default("channel_capacity", val));
                 }
             }
             "--timer-interval" => {
                 i += 1;
                 if let Some(n) = args.get(i) {
-                    config.lru_check_interval_ms = n.parse().expect("--timer-interval must be a number");
+                    let val: u64 = n.parse().expect("--timer-interval must be a number");
+                    figment = figment.merge(Serialized::default("lru_check_interval_ms", val));
                 }
             }
             "--port" => {
                 i += 1;
                 if let Some(n) = args.get(i) {
-                    config.api_port = n.parse().expect("--port must be a number");
+                    let val: u16 = n.parse().expect("--port must be a number");
+                    figment = figment.merge(Serialized::default("api_port", val));
                 }
             }
             _ => {}
         }
         i += 1;
     }
-    config
+
+    figment
+        .extract()
+        .expect("Failed to load configuration")
 }

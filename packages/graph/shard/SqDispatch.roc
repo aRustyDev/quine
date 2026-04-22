@@ -319,7 +319,7 @@ expect
 # Test: AddEdge produces EdgeAdded
 expect
     edge = { edge_type: "KNOWS", direction: Outgoing, other: QuineId.from_bytes([2]) }
-    cmd = AddEdge({ edge, reply_to: 1 })
+    cmd = AddEdge({ edge, reply_to: 1, is_reciprocal: Bool.false })
     events = derive_events(cmd, Dict.empty({}))
     when events is
         [EdgeAdded(_)] -> Bool.true
@@ -328,7 +328,7 @@ expect
 # Test: RemoveEdge produces EdgeRemoved
 expect
     edge = { edge_type: "KNOWS", direction: Outgoing, other: QuineId.from_bytes([2]) }
-    cmd = RemoveEdge({ edge, reply_to: 1 })
+    cmd = RemoveEdge({ edge, reply_to: 1, is_reciprocal: Bool.false })
     events = derive_events(cmd, Dict.empty({}))
     when events is
         [EdgeRemoved(_)] -> Bool.true

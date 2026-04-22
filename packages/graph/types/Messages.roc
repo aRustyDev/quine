@@ -27,8 +27,8 @@ LiteralCommand : [
     GetProps { reply_to : RequestId },
     SetProp { key : Str, value : PropertyValue, reply_to : RequestId },
     RemoveProp { key : Str, reply_to : RequestId },
-    AddEdge { edge : HalfEdge, reply_to : RequestId },
-    RemoveEdge { edge : HalfEdge, reply_to : RequestId },
+    AddEdge { edge : HalfEdge, reply_to : RequestId, is_reciprocal : Bool },
+    RemoveEdge { edge : HalfEdge, reply_to : RequestId, is_reciprocal : Bool },
     GetEdges { reply_to : RequestId },
 ]
 
@@ -40,6 +40,7 @@ LiteralCommand : [
 ReplyPayload : [
     Props (Dict Str PropertyValue),
     Edges (List HalfEdge),
+    NodeState { properties : Dict Str PropertyValue, edges : List HalfEdge },
     Ack,
     Err Str,
 ]
@@ -67,14 +68,14 @@ expect
 
 expect
     edge = { edge_type: "KNOWS", direction: Outgoing, other: QuineId.from_bytes([1]) }
-    msg = LiteralCmd(AddEdge({ edge, reply_to: 3 }))
+    msg = LiteralCmd(AddEdge({ edge, reply_to: 3, is_reciprocal: Bool.false }))
     when msg is
         LiteralCmd(AddEdge(_)) -> Bool.true
         _ -> Bool.false
 
 expect
     edge = { edge_type: "KNOWS", direction: Outgoing, other: QuineId.from_bytes([1]) }
-    msg = LiteralCmd(RemoveEdge({ edge, reply_to: 4 }))
+    msg = LiteralCmd(RemoveEdge({ edge, reply_to: 4, is_reciprocal: Bool.false }))
     when msg is
         LiteralCmd(RemoveEdge(_)) -> Bool.true
         _ -> Bool.false
@@ -105,6 +106,13 @@ expect
     reply = Edges([edge])
     when reply is
         Edges(_) -> Bool.true
+        _ -> Bool.false
+
+expect
+    reply : ReplyPayload
+    reply = NodeState({ properties: Dict.empty({}), edges: [] })
+    when reply is
+        NodeState({ properties, edges }) -> Dict.is_empty(properties) and List.is_empty(edges)
         _ -> Bool.false
 
 expect

@@ -1,6 +1,12 @@
 // platform/src/config.rs
 
+use serde::{Deserialize, Serialize};
+
 /// Configuration for the platform runtime.
+///
+/// Loaded via Figment with priority: CLI args > QUINE_* env vars > config file > defaults.
+#[derive(Deserialize, Serialize)]
+#[serde(default)]
 pub struct PlatformConfig {
     pub shard_count: u32,
     pub channel_capacity: usize,

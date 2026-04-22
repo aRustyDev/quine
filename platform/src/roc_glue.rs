@@ -184,6 +184,22 @@ pub fn channel_registry() -> &'static ChannelRegistry {
 }
 
 // ============================================================
+// Global shard count — used by roc_fx_shard_count.
+// ============================================================
+
+static SHARD_COUNT: OnceLock<u32> = OnceLock::new();
+
+pub fn set_shard_count(count: u32) {
+    if SHARD_COUNT.set(count).is_err() {
+        panic!("Shard count already initialized");
+    }
+}
+
+fn shard_count() -> u32 {
+    *SHARD_COUNT.get().expect("Shard count not initialized")
+}
+
+// ============================================================
 // Global persistence command sender — used by roc_fx_persist_async.
 // ============================================================
 
@@ -262,6 +278,7 @@ pub fn init() {
         roc_fx_persist_async as _,
         roc_fx_emit_sq_result as _,
         roc_fx_reply as _,
+        roc_fx_shard_count as _,
     ];
     #[allow(forgetting_references)]
     std::mem::forget(std::hint::black_box(funcs));
@@ -390,4 +407,11 @@ pub extern "C" fn roc_fx_reply(request_id: u64, payload: &RocList<u8>) {
             let _ = tx.send(bytes); // receiver may have timed out — ignore error
         }
     }
+}
+
+/// Return the total number of shards configured for this platform instance.
+/// Roc signature: shard_count! : {} => U32
+#[no_mangle]
+pub extern "C" fn roc_fx_shard_count() -> u32 {
+    shard_count()
 }

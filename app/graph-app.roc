@@ -30,15 +30,13 @@ tag_shard_cmd = 0x02
 tag_persist_result : U8
 tag_persist_result = 0xFE
 
-## Hardcoded shard count until the platform passes this via config.
-shard_count : U32
-shard_count = 4
-
 ## Create a new shard with default configuration.
+## Queries the host for the configured shard count.
 init_shard! : U32 => ShardState
 init_shard! = |shard_id|
-    Effect.log!(2, "graph-app: shard $(Num.to_str(shard_id)) initializing")
-    ShardState.new(shard_id, shard_count, default_config)
+    sc = Effect.shard_count!({})
+    Effect.log!(2, "graph-app: shard $(Num.to_str(shard_id)) initializing ($(Num.to_str(sc)) shards)")
+    ShardState.new(shard_id, sc, default_config)
 
 ## Handle an incoming message by discriminating on the tag byte.
 handle_message! : ShardState, List U8 => ShardState
@@ -179,7 +177,7 @@ execute_effect! = |effect|
             Effect.reply!(request_id, encoded)
 
         SendToNode({ target, msg }) ->
-            target_shard = Routing.shard_for_node(target, shard_count)
+            target_shard = Routing.shard_for_node(target, Effect.shard_count!({}))
             envelope = Codec.encode_shard_envelope(target, msg)
             when Effect.send_to_shard!(target_shard, envelope) is
                 Ok({}) -> {}
@@ -220,7 +218,7 @@ execute_effect! = |effect|
 ##               [edge_count:U32LE=0]
 ## Ack format: [prop_count:U32LE=0][edge_count:U32LE=0]
 ## Err format: [prop_count:U32LE=0][edge_count:U32LE=0] (error text discarded for now)
-encode_reply_payload : [Props (Dict Str _), Edges (List _), Ack, Err Str] -> List U8
+encode_reply_payload : [Props (Dict Str _), Edges (List _), NodeState { properties : Dict Str _, edges : List _ }, Ack, Err Str] -> List U8
 encode_reply_payload = |payload|
     when payload is
         Props(props) ->
@@ -245,6 +243,25 @@ encode_reply_payload = |payload|
             edge_bytes = List.walk(edges, [], |acc, edge|
                 List.concat(acc, Codec.encode_half_edge(edge)))
             prop_count
+            |> List.concat(edge_count)
+            |> List.concat(edge_bytes)
+
+        NodeState({ properties, edges }) ->
+            prop_count = Dict.len(properties) |> Num.to_u32
+            prop_header = encode_u32_le(prop_count)
+            prop_bytes = Dict.walk(properties, [], |acc, key, val|
+                key_bytes = Str.to_utf8(key)
+                key_len_bytes = encode_u16_le(Num.to_u16(List.len(key_bytes)))
+                val_bytes = Codec.encode_property_value(val)
+                acc
+                |> List.concat(key_len_bytes)
+                |> List.concat(key_bytes)
+                |> List.concat(val_bytes))
+            edge_count = List.len(edges) |> Num.to_u32 |> encode_u32_le
+            edge_bytes = List.walk(edges, [], |acc, edge|
+                List.concat(acc, Codec.encode_half_edge(edge)))
+            prop_header
+            |> List.concat(prop_bytes)
             |> List.concat(edge_count)
             |> List.concat(edge_bytes)
 

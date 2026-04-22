@@ -1,4 +1,4 @@
-hosted [send_to_shard!, persist_async!, current_time!, log!, emit_sq_result!, reply!]
+hosted [send_to_shard!, persist_async!, current_time!, log!, emit_sq_result!, reply!, shard_count!]
 
 ## Send a message to a shard's input channel.
 ## Returns 0 on success, 1 if the channel is full.
@@ -23,3 +23,6 @@ emit_sq_result! : List U8 => U8
 ## Send a reply to a pending request (node query).
 ## The host routes the payload to the waiting HTTP handler via request_id.
 reply! : U64, List U8 => {}
+
+## Return the total number of shards configured for this platform instance.
+shard_count! : {} => U32

@@ -53,7 +53,8 @@ handle_literal : NodeState, LiteralCommand -> { state : NodeState, effects : Lis
 handle_literal = |node, cmd|
     when cmd is
         GetProps({ reply_to }) ->
-            reply = Reply({ request_id: reply_to, payload: Props(node.properties) })
+            all_edges = Dict.walk(node.edges, [], |acc, _key, edge_list| List.concat(acc, edge_list))
+            reply = Reply({ request_id: reply_to, payload: NodeState({ properties: node.properties, edges: all_edges }) })
             { state: node, effects: [reply] }
 
         SetProp({ key, value, reply_to }) ->
@@ -68,22 +69,20 @@ handle_literal = |node, cmd|
             reply = Reply({ request_id: reply_to, payload: Ack })
             { state: new_state, effects: [reply] }
 
-        AddEdge({ edge, reply_to }) ->
+        AddEdge({ edge, reply_to, is_reciprocal }) ->
             existing = Dict.get(node.edges, edge.edge_type) |> Result.with_default([])
             new_list = List.append(existing, edge)
             new_edges = Dict.insert(node.edges, edge.edge_type, new_list)
             new_state = { node & edges: new_edges }
             reply = Reply({ request_id: reply_to, payload: Ack })
-            # Only send a reciprocal for originating commands (reply_to > 0).
-            # Reciprocals arrive with reply_to = 0 — sending another would loop.
-            if reply_to > 0 then
+            if !(is_reciprocal) then
                 reciprocal = HalfEdge.reflect(edge, node.id)
-                send_reciprocal = SendToNode({ target: edge.other, msg: LiteralCmd(AddEdge({ edge: reciprocal, reply_to: 0 })) })
+                send_reciprocal = SendToNode({ target: edge.other, msg: LiteralCmd(AddEdge({ edge: reciprocal, reply_to: 0, is_reciprocal: Bool.true })) })
                 { state: new_state, effects: [reply, send_reciprocal] }
             else
                 { state: new_state, effects: [reply] }
 
-        RemoveEdge({ edge, reply_to }) ->
+        RemoveEdge({ edge, reply_to, is_reciprocal }) ->
             existing = Dict.get(node.edges, edge.edge_type) |> Result.with_default([])
             filtered = List.keep_if(existing, |e| e != edge)
             new_edges =
@@ -93,9 +92,9 @@ handle_literal = |node, cmd|
                     Dict.insert(node.edges, edge.edge_type, filtered)
             new_state = { node & edges: new_edges }
             reply = Reply({ request_id: reply_to, payload: Ack })
-            if reply_to > 0 then
+            if !(is_reciprocal) then
                 reciprocal = HalfEdge.reflect(edge, node.id)
-                send_reciprocal = SendToNode({ target: edge.other, msg: LiteralCmd(RemoveEdge({ edge: reciprocal, reply_to: 0 })) })
+                send_reciprocal = SendToNode({ target: edge.other, msg: LiteralCmd(RemoveEdge({ edge: reciprocal, reply_to: 0, is_reciprocal: Bool.true })) })
                 { state: new_state, effects: [reply, send_reciprocal] }
             else
                 { state: new_state, effects: [reply] }
@@ -122,7 +121,7 @@ expect
     }
     result = dispatch_node_msg(node, LiteralCmd(GetProps({ reply_to: 1 })), |_| Err(NotFound))
     when List.first(result.effects) is
-        Ok(Reply({ payload: Props(props) })) -> Dict.is_empty(props)
+        Ok(Reply({ payload: NodeState({ properties, edges }) })) -> Dict.is_empty(properties) and List.is_empty(edges)
         _ -> Bool.false
 
 expect
@@ -159,7 +158,7 @@ expect
     after_set = dispatch_node_msg(node, LiteralCmd(SetProp({ key: "name", value: pv, reply_to: 1 })), |_| Err(NotFound))
     after_get = dispatch_node_msg(after_set.state, LiteralCmd(GetProps({ reply_to: 2 })), |_| Err(NotFound))
     when List.first(after_get.effects) is
-        Ok(Reply({ payload: Props(props) })) -> Dict.contains(props, "name")
+        Ok(Reply({ payload: NodeState({ properties }) })) -> Dict.contains(properties, "name")
         _ -> Bool.false
 
 expect
@@ -194,7 +193,7 @@ expect
         watchable_event_index: WatchableEventIndex.empty,
     }
     edge = { edge_type: "KNOWS", direction: Outgoing, other: qid_b }
-    result = dispatch_node_msg(node, LiteralCmd(AddEdge({ edge, reply_to: 1 })), |_| Err(NotFound))
+    result = dispatch_node_msg(node, LiteralCmd(AddEdge({ edge, reply_to: 1, is_reciprocal: Bool.false })), |_| Err(NotFound))
     # Should have reply + SendToNode
     has_reply = List.any(result.effects, |e| when e is
         Reply({ payload: Ack }) -> Bool.true

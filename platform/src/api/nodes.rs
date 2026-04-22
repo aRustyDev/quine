@@ -35,18 +35,18 @@ fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-// GetProps command tag (must match Roc Codec: GetProps = 0x01, GetEdges = 0x06)
-const TAG_GET_PROPS: u8 = 0x01;
+// GetProps / GetNodeState command tag (must match Roc Codec: GetProps = 0x01, GetEdges = 0x06)
+const TAG_GET_NODE_STATE: u8 = 0x01;
 
-/// Encode a GetProps shard message:
-///   [TAG_SHARD_MSG][qid_len:U16LE][qid_bytes...][TAG_GET_PROPS][reply_to:U64LE]
-fn encode_get_props(qid: &[u8; 16], request_id: u64) -> Vec<u8> {
-    // TAG_SHARD_MSG(1) + qid_len(2) + qid(16) + TAG_GET_PROPS(1) + reply_to(8) = 28
+/// Encode a GetNodeState shard message:
+///   [TAG_SHARD_MSG][qid_len:U16LE][qid_bytes...][TAG_GET_NODE_STATE][reply_to:U64LE]
+fn encode_get_node_state(qid: &[u8; 16], request_id: u64) -> Vec<u8> {
+    // TAG_SHARD_MSG(1) + qid_len(2) + qid(16) + TAG_GET_NODE_STATE(1) + reply_to(8) = 28
     let mut buf = Vec::with_capacity(28);
     buf.push(TAG_SHARD_MSG);
     buf.extend_from_slice(&(qid.len() as u16).to_le_bytes());
     buf.extend_from_slice(qid);
-    buf.push(TAG_GET_PROPS);
+    buf.push(TAG_GET_NODE_STATE);
     buf.extend_from_slice(&request_id.to_le_bytes());
     buf
 }
@@ -67,8 +67,8 @@ async fn get_node(
         pending.insert(request_id, tx);
     }
 
-    // Send GetProps to shard
-    let msg = encode_get_props(&qid, request_id);
+    // Send GetNodeState to shard
+    let msg = encode_get_node_state(&qid, request_id);
     if !state.channel_registry.try_send(target_shard, msg) {
         // Clean up pending request on failure
         let mut pending = state.pending_requests.lock().unwrap();
@@ -213,6 +213,26 @@ fn decode_quine_value(buf: &[u8], offset: usize) -> Option<(serde_json::Value, u
         0x04 => Some((serde_json::Value::Bool(true), offset + 1)),
         0x05 => Some((serde_json::Value::Bool(false), offset + 1)),
         0x06 => Some((serde_json::Value::Null, offset + 1)),
+        0x07 => {
+            // Serialized / Bytes — length-prefixed byte blob, render as hex
+            let len = read_u16_le(buf, offset + 1)? as usize;
+            let start = offset + 3;
+            if start + len > buf.len() {
+                return None;
+            }
+            let hex: String = buf[start..start + len].iter().map(|b| format!("{:02x}", b)).collect();
+            Some((serde_json::json!(hex), start + len))
+        }
+        0x08 => {
+            // Id(QuineId) — length-prefixed QID bytes, render as hex
+            let len = read_u16_le(buf, offset + 1)? as usize;
+            let start = offset + 3;
+            if start + len > buf.len() {
+                return None;
+            }
+            let hex: String = buf[start..start + len].iter().map(|b| format!("{:02x}", b)).collect();
+            Some((serde_json::json!(hex), start + len))
+        }
         _ => None,
     }
 }

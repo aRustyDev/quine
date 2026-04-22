@@ -1,6 +1,6 @@
 ## Public effect API for apps running on the quine-graph platform.
 ## Apps import this module to call host-provided functions.
-module [send_to_shard!, persist_async!, current_time!, log!, emit_sq_result!, reply!]
+module [send_to_shard!, persist_async!, current_time!, log!, emit_sq_result!, reply!, shard_count!]
 
 import Host
 
@@ -47,3 +47,8 @@ emit_sq_result! = |payload|
 reply! : U64, List U8 => {}
 reply! = |request_id, payload|
     Host.reply!(request_id, payload)
+
+## Query the total number of shards configured for this platform instance.
+shard_count! : {} => U32
+shard_count! = |{}|
+    Host.shard_count!({})

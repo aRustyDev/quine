@@ -102,7 +102,8 @@ fn encode_mutation(buf: &mut Vec<u8>, mutation: &Mutation) {
             other_id,
         } => {
             buf.push(TAG_ADD_EDGE);
-            encode_u64(buf, 0);
+            encode_u64(buf, 0); // reply_to = 0 (no reply expected from ingest)
+            buf.push(0x00);     // is_reciprocal = false (ingest creates originating edges)
             encode_half_edge(buf, edge_type, direction, other_id);
         }
         Mutation::RemoveEdge {
@@ -112,6 +113,7 @@ fn encode_mutation(buf: &mut Vec<u8>, mutation: &Mutation) {
         } => {
             buf.push(TAG_REMOVE_EDGE);
             encode_u64(buf, 0);
+            buf.push(0x00); // is_reciprocal = false
             encode_half_edge(buf, edge_type, direction, other_id);
         }
     }
@@ -273,10 +275,11 @@ mod tests {
                 other_id: [1u8; 16],
             },
         );
-        // TAG_SHARD_MSG(1) + qid(18) + TAG_ADD_EDGE(1) + reply_to(8) = offset 28
+        // TAG_SHARD_MSG(1) + qid(18) + TAG_ADD_EDGE(1) + reply_to(8) + is_reciprocal(1) = offset 29
         // Then edge_type: len(2) + "KNOWS"(5) = 7 bytes
-        // Direction at offset 28 + 7 = 35
+        // Direction at offset 29 + 7 = 36
         assert_eq!(msg[19], TAG_ADD_EDGE);
-        assert_eq!(msg[35], DIR_OUTGOING);
+        assert_eq!(msg[28], 0x00); // is_reciprocal = false
+        assert_eq!(msg[36], DIR_OUTGOING);
     }
 }

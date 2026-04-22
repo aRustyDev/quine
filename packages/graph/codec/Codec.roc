@@ -750,14 +750,16 @@ encode_literal_cmd = |cmd|
             |> List.concat(encode_u64(reply_to))
             |> List.concat(encode_str(key))
 
-        AddEdge({ edge, reply_to }) ->
+        AddEdge({ edge, reply_to, is_reciprocal }) ->
             [0x04]
             |> List.concat(encode_u64(reply_to))
+            |> List.append(if is_reciprocal then 1u8 else 0u8)
             |> List.concat(encode_half_edge(edge))
 
-        RemoveEdge({ edge, reply_to }) ->
+        RemoveEdge({ edge, reply_to, is_reciprocal }) ->
             [0x05]
             |> List.concat(encode_u64(reply_to))
+            |> List.append(if is_reciprocal then 1u8 else 0u8)
             |> List.concat(encode_half_edge(edge))
 
         GetEdges({ reply_to }) ->
@@ -844,27 +846,35 @@ decode_add_edge : List U8, U64 -> Result { val : NodeMessage, next : U64 } [OutO
 decode_add_edge = |buf, start|
     when decode_u64(buf, start) is
         Err(e) -> Err(e)
-        Ok({ val: reply_to, next: edge_start }) ->
-            when decode_half_edge(buf, edge_start) is
-                Ok({ val: edge, next }) ->
-                    Ok({ val: LiteralCmd(AddEdge({ edge, reply_to })), next })
+        Ok({ val: reply_to, next: flag_offset }) ->
+            when List.get(buf, flag_offset) is
+                Err(_) -> Err(OutOfBounds)
+                Ok(flag) ->
+                    is_reciprocal = flag != 0
+                    when decode_half_edge(buf, flag_offset + 1) is
+                        Ok({ val: edge, next }) ->
+                            Ok({ val: LiteralCmd(AddEdge({ edge, reply_to, is_reciprocal })), next })
 
-                Err(OutOfBounds) -> Err(OutOfBounds)
-                Err(BadUtf8) -> Err(BadUtf8)
-                Err(InvalidDirection) -> Err(InvalidDirection)
+                        Err(OutOfBounds) -> Err(OutOfBounds)
+                        Err(BadUtf8) -> Err(BadUtf8)
+                        Err(InvalidDirection) -> Err(InvalidDirection)
 
 decode_remove_edge : List U8, U64 -> Result { val : NodeMessage, next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
 decode_remove_edge = |buf, start|
     when decode_u64(buf, start) is
         Err(e) -> Err(e)
-        Ok({ val: reply_to, next: edge_start }) ->
-            when decode_half_edge(buf, edge_start) is
-                Ok({ val: edge, next }) ->
-                    Ok({ val: LiteralCmd(RemoveEdge({ edge, reply_to })), next })
+        Ok({ val: reply_to, next: flag_offset }) ->
+            when List.get(buf, flag_offset) is
+                Err(_) -> Err(OutOfBounds)
+                Ok(flag) ->
+                    is_reciprocal = flag != 0
+                    when decode_half_edge(buf, flag_offset + 1) is
+                        Ok({ val: edge, next }) ->
+                            Ok({ val: LiteralCmd(RemoveEdge({ edge, reply_to, is_reciprocal })), next })
 
-                Err(OutOfBounds) -> Err(OutOfBounds)
-                Err(BadUtf8) -> Err(BadUtf8)
-                Err(InvalidDirection) -> Err(InvalidDirection)
+                        Err(OutOfBounds) -> Err(OutOfBounds)
+                        Err(BadUtf8) -> Err(BadUtf8)
+                        Err(InvalidDirection) -> Err(InvalidDirection)
 
 # ===== Shard Envelope =====
 
@@ -1187,25 +1197,27 @@ expect
 
 expect
     edge = { edge_type: "FOLLOWS", direction: Incoming, other: QuineId.from_bytes([5]) }
-    msg = LiteralCmd(AddEdge({ edge, reply_to: 10 }))
+    msg = LiteralCmd(AddEdge({ edge, reply_to: 10, is_reciprocal: Bool.false }))
     encoded = encode_node_msg(msg)
     when decode_node_msg(encoded, 0) is
-        Ok({ val: LiteralCmd(AddEdge({ edge: decoded_edge, reply_to: 10 })) }) ->
+        Ok({ val: LiteralCmd(AddEdge({ edge: decoded_edge, reply_to: 10, is_reciprocal })) }) ->
             decoded_edge.edge_type == "FOLLOWS"
             and decoded_edge.direction == Incoming
             and QuineId.to_bytes(decoded_edge.other) == [5]
+            and is_reciprocal == Bool.false
 
         _ -> Bool.false
 
 expect
     edge = { edge_type: "PEER", direction: Undirected, other: QuineId.from_bytes([8]) }
-    msg = LiteralCmd(RemoveEdge({ edge, reply_to: 20 }))
+    msg = LiteralCmd(RemoveEdge({ edge, reply_to: 20, is_reciprocal: Bool.false }))
     encoded = encode_node_msg(msg)
     when decode_node_msg(encoded, 0) is
-        Ok({ val: LiteralCmd(RemoveEdge({ edge: decoded_edge, reply_to: 20 })) }) ->
+        Ok({ val: LiteralCmd(RemoveEdge({ edge: decoded_edge, reply_to: 20, is_reciprocal })) }) ->
             decoded_edge.edge_type == "PEER"
             and decoded_edge.direction == Undirected
             and QuineId.to_bytes(decoded_edge.other) == [8]
+            and is_reciprocal == Bool.false
 
         _ -> Bool.false
 
