@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sequence: Standing Query Activation</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --color-paper:   #f5f5f5;
+      --color-ink:     #2d3142;
+      --color-muted:   #4f5d75;
+      --color-soft:    #7a8399;
+      --color-accent:  #eb6c36;
+      --font-sans:     'Geist', system-ui, sans-serif;
+      --font-serif:    'Instrument Serif', serif;
+      --font-mono:     'Geist Mono', ui-monospace, monospace;
+    }
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem 2rem;
+    }
+    .frame { max-width: 1200px; width: 100%; }
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-muted);
+      margin-bottom: 0.5rem;
+    }
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      color: var(--color-ink);
+      margin-bottom: 1.5rem;
+    }
+    svg { width: 100%; min-width: 800px; display: block; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Sequence &middot; Quine-Roc Architecture</p>
+    <h1>Standing Query Activation</h1>
+
+    <svg viewBox="0 0 960 340" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+        </marker>
+        <marker id="arr-acc" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/>
+        </marker>
+      </defs>
+
+      <!-- Background -->
+      <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+      <!-- ── Lifelines ── -->
+      <line x1="128" y1="76" x2="128" y2="272" stroke="rgba(45,49,66,0.18)" stroke-width="1" stroke-dasharray="3,3"/>
+      <line x1="352" y1="76" x2="352" y2="272" stroke="rgba(45,49,66,0.18)" stroke-width="1" stroke-dasharray="3,3"/>
+      <line x1="576" y1="76" x2="576" y2="272" stroke="rgba(45,49,66,0.18)" stroke-width="1" stroke-dasharray="3,3"/>
+      <line x1="800" y1="76" x2="800" y2="272" stroke="rgba(45,49,66,0.18)" stroke-width="1" stroke-dasharray="3,3"/>
+
+      <!-- ── Messages ── -->
+
+      <!-- 1. Source → Rust: JSONL LINE (data arrives — triggers the chain) -->
+      <line x1="128" y1="108" x2="352" y2="108" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr)"/>
+      <rect x="210" y="96" width="60" height="14" rx="2" fill="#f5f5f5"/>
+      <text x="240" y="106" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">JSONL LINE</text>
+
+      <!-- 2. Rust → Roc: SHARD CMD (mutation reaches node) -->
+      <line x1="352" y1="144" x2="576" y2="144" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr)"/>
+      <rect x="436" y="132" width="56" height="14" rx="2" fill="#f5f5f5"/>
+      <text x="464" y="142" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SHARD CMD</text>
+
+      <!-- 3. Roc self-loop: APPLY + SQ CHECK (mutation applied, predicates evaluated) -->
+      <path d="M 576,176 h 36 v 28 h -36" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr)"/>
+      <text x="620" y="192" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.06em">APPLY + SQ CHECK</text>
+
+      <!-- 4. Roc → Rust: SQ MATCH [FOCAL — reactive trigger, host effect] -->
+      <line x1="576" y1="220" x2="352" y2="220" stroke="#eb6c36" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arr-acc)"/>
+      <rect x="436" y="208" width="56" height="14" rx="2" fill="#f5f5f5"/>
+      <text x="464" y="218" fill="#eb6c36" font-size="8" font-weight="500" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SQ MATCH</text>
+
+      <!-- 5. Rust → Sink: OUTPUT (Rust delivers to configured destination) -->
+      <line x1="352" y1="252" x2="800" y2="252" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr)"/>
+      <rect x="556" y="240" width="40" height="14" rx="2" fill="#f5f5f5"/>
+      <text x="576" y="250" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">OUTPUT</text>
+
+      <!-- ── Actor boxes ── -->
+      <!-- Source -->
+      <rect x="58" y="32" width="140" height="44" rx="6" fill="#f5f5f5"/>
+      <rect x="58" y="32" width="140" height="44" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+      <text x="128" y="58" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Source</text>
+
+      <!-- Rust Platform -->
+      <rect x="282" y="32" width="140" height="44" rx="6" fill="#f5f5f5"/>
+      <rect x="282" y="32" width="140" height="44" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <text x="352" y="58" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Rust Platform</text>
+
+      <!-- Roc Logic -->
+      <rect x="506" y="32" width="140" height="44" rx="6" fill="#f5f5f5"/>
+      <rect x="506" y="32" width="140" height="44" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <text x="576" y="58" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Roc Logic</text>
+
+      <!-- Sink -->
+      <rect x="730" y="32" width="140" height="44" rx="6" fill="#f5f5f5"/>
+      <rect x="730" y="32" width="140" height="44" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+      <text x="800" y="58" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Sink</text>
+
+      <!-- ── Legend ── -->
+      <line x1="56" y1="292" x2="904" y2="292" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+      <text x="56" y="312" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+      <line x1="128" y1="312" x2="164" y2="312" stroke="#4f5d75" stroke-width="1" marker-end="url(#arr)"/>
+      <text x="176" y="316" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace">Request / command</text>
+      <line x1="348" y1="312" x2="384" y2="312" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arr)"/>
+      <text x="396" y="316" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace">Effect / response</text>
+      <line x1="556" y1="312" x2="592" y2="312" stroke="#eb6c36" stroke-width="1.2" marker-end="url(#arr-acc)"/>
+      <text x="604" y="316" fill="#eb6c36" font-size="8" font-family="'Geist Mono', monospace">Reactive SQ trigger</text>
+    </svg>
+  </div>
+</body>
+</html>
