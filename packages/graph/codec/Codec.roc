@@ -9,6 +9,7 @@ module [
     decode_node_snapshot,
     encode_property_value,
     encode_half_edge,
+    decode_shard_cmd,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -21,7 +22,8 @@ import model.NodeSnapshot exposing [NodeSnapshot, SqStateSnapshot]
 import types.Messages exposing [NodeMessage, LiteralCommand]
 import standing_messages.SqMessages exposing [SqCommand]
 import standing_state.SqPartState exposing [SqMsgSubscriber, SubscriptionResult]
-import standing_result.StandingQueryResult exposing [QueryContext]
+import standing_result.StandingQueryResult exposing [QueryContext, StandingQueryId]
+import standing_ast.MvStandingQuery exposing [MvStandingQuery]
 
 # ===== Primitive Encoders =====
 
@@ -582,6 +584,142 @@ decode_sq_command = |buf, offset|
                 0x13 ->
                     Ok({ val: UpdateStandingQueries, next: data_start })
 
+                _ -> Err(InvalidTag)
+
+# ===== Shard Command Decoding =====
+
+## Shard-level command tags (sent by the REST API to shard channels).
+## These are distinct from node-level SqCommand tags (0x10-0x13) above.
+##
+## 0x01 = RegisterSq:  [global_id:U128LE][include_cancel:U8][mvsq_bytes...]
+## 0x02 = UpdateSqs:   (no data)
+## 0x03 = CancelSq:    [global_id:U128LE]
+
+## Decode a shard-level command from the buffer at the given offset.
+## Returns RegisterSq, UpdateSqs, or CancelSq.
+decode_shard_cmd : List U8, U64 -> Result { val : [RegisterSq { global_id : StandingQueryId, include_cancellations : Bool, query : MvStandingQuery }, UpdateSqs, CancelSq { global_id : StandingQueryId }], next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
+decode_shard_cmd = |buf, offset|
+    when List.get(buf, offset) is
+        Err(_) -> Err(OutOfBounds)
+        Ok(tag) ->
+            data_start = offset + 1
+            when tag is
+                0x01 ->
+                    when decode_u128(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: global_id, next: flag_offset }) ->
+                            when List.get(buf, flag_offset) is
+                                Err(_) -> Err(OutOfBounds)
+                                Ok(flag) ->
+                                    include_cancellations = flag != 0
+                                    when decode_mvsq(buf, flag_offset + 1) is
+                                        Err(e) -> Err(e)
+                                        Ok({ val: query, next }) ->
+                                            Ok({ val: RegisterSq({ global_id, include_cancellations, query }), next })
+
+                0x02 ->
+                    Ok({ val: UpdateSqs, next: data_start })
+
+                0x03 ->
+                    when decode_u128(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: global_id, next }) ->
+                            Ok({ val: CancelSq({ global_id }), next })
+
+                _ -> Err(InvalidTag)
+
+# ===== MvStandingQuery Binary Encoding =====
+#
+# Tag bytes for MvStandingQuery variants:
+#   0x00 = UnitSq
+#   0x01 = Cross
+#   0x02 = LocalProperty
+#   0x03 = LocalId
+#   0x04 = AllProperties
+#   0x05 = SubscribeAcrossEdge
+#
+# ValueConstraint tags:
+#   0x00 = Any
+#   0x01 = None
+#   0x02 = Unconditional
+#   0x03 = Equal
+#   0x04 = NotEqual
+#   0x05 = Regex
+#
+# Alias encoding:
+#   0x00 = NoAlias
+#   0x01 = Ok(alias_string)
+
+decode_mvsq : List U8, U64 -> Result { val : MvStandingQuery, next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
+decode_mvsq = |buf, offset|
+    when List.get(buf, offset) is
+        Err(_) -> Err(OutOfBounds)
+        Ok(tag) ->
+            data_start = offset + 1
+            when tag is
+                0x00 -> Ok({ val: UnitSq, next: data_start })
+
+                0x02 ->
+                    # LocalProperty: [key][constraint][alias]
+                    when decode_str(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: prop_key, next: constraint_start }) ->
+                            when decode_value_constraint(buf, constraint_start) is
+                                Err(e) -> Err(e)
+                                Ok({ val: constraint, next: alias_start }) ->
+                                    when decode_optional_alias(buf, alias_start) is
+                                        Err(e) -> Err(e)
+                                        Ok({ val: aliased_as, next }) ->
+                                            Ok({ val: LocalProperty({ prop_key, constraint, aliased_as }), next })
+
+                0x03 ->
+                    # LocalId: [alias_str][format_as_string:U8]
+                    when decode_str(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: aliased_as, next: flag_offset }) ->
+                            when List.get(buf, flag_offset) is
+                                Err(_) -> Err(OutOfBounds)
+                                Ok(flag) ->
+                                    Ok({ val: LocalId({ aliased_as, format_as_string: flag != 0 }), next: flag_offset + 1 })
+
+                0x04 ->
+                    # AllProperties: [alias_str]
+                    when decode_str(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: aliased_as, next }) ->
+                            Ok({ val: AllProperties({ aliased_as }), next })
+
+                _ -> Err(InvalidTag)
+
+decode_value_constraint : List U8, U64 -> Result { val : [Equal _, NotEqual _, Any, None, Unconditional, Regex Str, ListContains _], next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
+decode_value_constraint = |buf, offset|
+    when List.get(buf, offset) is
+        Err(_) -> Err(OutOfBounds)
+        Ok(tag) ->
+            data_start = offset + 1
+            when tag is
+                0x00 -> Ok({ val: Any, next: data_start })
+                0x01 -> Ok({ val: None, next: data_start })
+                0x02 -> Ok({ val: Unconditional, next: data_start })
+                0x05 ->
+                    when decode_str(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: pattern, next }) ->
+                            Ok({ val: Regex(pattern), next })
+                _ -> Err(InvalidTag)
+
+decode_optional_alias : List U8, U64 -> Result { val : Result Str [NoAlias], next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
+decode_optional_alias = |buf, offset|
+    when List.get(buf, offset) is
+        Err(_) -> Err(OutOfBounds)
+        Ok(tag) ->
+            when tag is
+                0x00 -> Ok({ val: Err(NoAlias), next: offset + 1 })
+                0x01 ->
+                    when decode_str(buf, offset + 1) is
+                        Err(e) -> Err(e)
+                        Ok({ val: alias, next }) ->
+                            Ok({ val: Ok(alias), next })
                 _ -> Err(InvalidTag)
 
 # ===== NodeMessage Encoding =====

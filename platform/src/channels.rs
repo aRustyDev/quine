@@ -5,6 +5,7 @@ use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 /// Message tag bytes -- shard workers use these to distinguish message types
 /// on the shared channel.
 pub const TAG_SHARD_MSG: u8 = 0x01;
+pub const TAG_SHARD_CMD: u8 = 0x02;
 pub const TAG_TIMER: u8 = 0xFF;
 pub const TAG_PERSIST_RESULT: u8 = 0xFE;
 

@@ -24,6 +24,9 @@ ShardState : ShardState.ShardState
 tag_shard_msg : U8
 tag_shard_msg = 0x01
 
+tag_shard_cmd : U8
+tag_shard_cmd = 0x02
+
 tag_persist_result : U8
 tag_persist_result = 0xFE
 
@@ -48,6 +51,8 @@ handle_message! = |state, msg|
         Ok(tag) ->
             if tag == tag_shard_msg then
                 handle_shard_msg!(state, msg)
+            else if tag == tag_shard_cmd then
+                handle_shard_cmd!(state, msg)
             else if tag == tag_persist_result then
                 handle_persist_result!(state, msg)
             else
@@ -67,6 +72,32 @@ handle_shard_msg! = |state, msg|
         Err(err) ->
             err_str = decode_err_to_str(err)
             Effect.log!(1, "graph-app: decode error: $(err_str)")
+            state
+
+## Handle a shard-level command (SQ registration, update, cancellation).
+## These are sent by the REST API to all shards, not targeted at a specific node.
+handle_shard_cmd! : ShardState, List U8 => ShardState
+handle_shard_cmd! = |state, msg|
+    # Decode shard command starting after the TAG_SHARD_CMD byte (offset 1)
+    when Codec.decode_shard_cmd(msg, 1) is
+        Ok({ val: RegisterSq({ global_id, include_cancellations, query }) }) ->
+            Effect.log!(2, "graph-app: registering SQ $(Num.to_str(global_id))")
+            updated = ShardState.register_standing_query(state, global_id, query, include_cancellations)
+            drain_effects!(updated)
+
+        Ok({ val: UpdateSqs }) ->
+            Effect.log!(3, "graph-app: broadcasting SQ update to nodes")
+            updated = ShardState.broadcast_update_standing_queries(state)
+            drain_effects!(updated)
+
+        Ok({ val: CancelSq({ global_id }) }) ->
+            Effect.log!(2, "graph-app: cancelling SQ $(Num.to_str(global_id))")
+            updated = ShardState.cancel_standing_query(state, global_id)
+            drain_effects!(updated)
+
+        Err(err) ->
+            err_str = decode_err_to_str(err)
+            Effect.log!(1, "graph-app: shard cmd decode error: $(err_str)")
             state
 
 ## Handle timer ticks: run LRU eviction and drain effects.

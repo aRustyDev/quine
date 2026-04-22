@@ -10,7 +10,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use super::{AppState, SqEntry};
-use crate::channels::TAG_SHARD_MSG;
+use crate::channels::TAG_SHARD_CMD;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -46,59 +46,113 @@ pub(crate) struct SqResultEntry {
     pub(crate) data: serde_json::Value,
 }
 
-// ---- SQ Command Wire Format ----
+// ---- Shard Command Wire Format ----
 //
-// Standing query commands are sent to shards as shard messages with
-// special command tags. These mirror the Roc-side SqCommand encoding.
+// Standing query commands are shard-level (not node-targeted), so they use
+// TAG_SHARD_CMD (0x02) instead of TAG_SHARD_MSG (0x01).
 //
-// CreateSqSubscription: TAG_SQ_CREATE (0x10)
-//   [0x10][query_id:U128LE][include_cancel:U8][mvsq_bytes...]
-//
-// UpdateStandingQueries: TAG_SQ_UPDATE (0x11)
-//   [0x11]
-//
-// CancelSqSubscription: TAG_SQ_CANCEL (0x12)
-//   [0x12][query_id:U128LE]
+// Shard command sub-tags (decoded by Codec.decode_shard_cmd in Roc):
+//   0x01 = RegisterSq:  [global_id:U128LE][include_cancel:U8][mvsq_bytes...]
+//   0x02 = UpdateSqs:   (no data)
+//   0x03 = CancelSq:    [global_id:U128LE]
 
-const TAG_SQ_CREATE: u8 = 0x10;
-const TAG_SQ_UPDATE: u8 = 0x11;
-const TAG_SQ_CANCEL: u8 = 0x12;
+const CMD_REGISTER_SQ: u8 = 0x01;
+const CMD_UPDATE_SQS: u8 = 0x02;
+const CMD_CANCEL_SQ: u8 = 0x03;
 
-/// Encode the MVSQ AST JSON into wire format bytes.
-/// For now this is a passthrough: store the JSON bytes as the "query" field.
-/// A proper AST→wire encoder will be added when we have real SQ evaluation.
-fn encode_mvsq_json(query: &serde_json::Value) -> Vec<u8> {
-    serde_json::to_vec(query).unwrap_or_default()
+/// Encode an MVSQ AST JSON value to binary wire format matching the Roc decoder.
+///
+/// Supported query types (matching Codec.decode_mvsq tags):
+///   0x00 = UnitSq
+///   0x02 = LocalProperty
+///   0x03 = LocalId
+///   0x04 = AllProperties
+fn encode_mvsq_binary(query: &serde_json::Value) -> Vec<u8> {
+    match query.get("type").and_then(|v| v.as_str()) {
+        Some("UnitSq") => vec![0x00],
+        Some("LocalProperty") => {
+            let mut buf = vec![0x02];
+            let key = query.get("prop_key").and_then(|v| v.as_str()).unwrap_or("");
+            buf.extend_from_slice(&(key.len() as u16).to_le_bytes());
+            buf.extend_from_slice(key.as_bytes());
+            // ValueConstraint
+            buf.extend_from_slice(&encode_value_constraint(
+                query.get("constraint").unwrap_or(&serde_json::Value::Null),
+            ));
+            // Alias
+            match query.get("aliased_as").and_then(|v| v.as_str()) {
+                Some(alias) => {
+                    buf.push(0x01);
+                    buf.extend_from_slice(&(alias.len() as u16).to_le_bytes());
+                    buf.extend_from_slice(alias.as_bytes());
+                }
+                None => buf.push(0x00),
+            }
+            buf
+        }
+        Some("LocalId") => {
+            let mut buf = vec![0x03];
+            let alias = query.get("aliased_as").and_then(|v| v.as_str()).unwrap_or("id");
+            buf.extend_from_slice(&(alias.len() as u16).to_le_bytes());
+            buf.extend_from_slice(alias.as_bytes());
+            let format_str = query.get("format_as_string").and_then(|v| v.as_bool()).unwrap_or(false);
+            buf.push(if format_str { 1 } else { 0 });
+            buf
+        }
+        Some("AllProperties") => {
+            let mut buf = vec![0x04];
+            let alias = query.get("aliased_as").and_then(|v| v.as_str()).unwrap_or("props");
+            buf.extend_from_slice(&(alias.len() as u16).to_le_bytes());
+            buf.extend_from_slice(alias.as_bytes());
+            buf
+        }
+        _ => vec![0x00], // Fallback to UnitSq
+    }
 }
 
-fn encode_create_sq_command(query_id: u128, include_cancel: bool, query: &serde_json::Value) -> Vec<u8> {
-    let mvsq = encode_mvsq_json(query);
+fn encode_value_constraint(constraint: &serde_json::Value) -> Vec<u8> {
+    match constraint.get("type").and_then(|v| v.as_str()) {
+        Some("Any") => vec![0x00],
+        Some("None") => vec![0x01],
+        Some("Unconditional") => vec![0x02],
+        Some("Regex") => {
+            let pattern = constraint.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            let mut buf = vec![0x05];
+            buf.extend_from_slice(&(pattern.len() as u16).to_le_bytes());
+            buf.extend_from_slice(pattern.as_bytes());
+            buf
+        }
+        _ => vec![0x00], // Default to Any
+    }
+}
+
+fn encode_register_sq_command(query_id: u128, include_cancel: bool, query: &serde_json::Value) -> Vec<u8> {
+    let mvsq = encode_mvsq_binary(query);
     let mut buf = Vec::with_capacity(1 + 16 + 1 + mvsq.len());
-    buf.push(TAG_SQ_CREATE);
+    buf.push(CMD_REGISTER_SQ);
     buf.extend_from_slice(&query_id.to_le_bytes());
     buf.push(if include_cancel { 1 } else { 0 });
     buf.extend_from_slice(&mvsq);
     buf
 }
 
-fn encode_update_sq_command() -> Vec<u8> {
-    vec![TAG_SQ_UPDATE]
+fn encode_update_sqs_command() -> Vec<u8> {
+    vec![CMD_UPDATE_SQS]
 }
 
 fn encode_cancel_sq_command(query_id: u128) -> Vec<u8> {
     let mut buf = Vec::with_capacity(1 + 16);
-    buf.push(TAG_SQ_CANCEL);
+    buf.push(CMD_CANCEL_SQ);
     buf.extend_from_slice(&query_id.to_le_bytes());
     buf
 }
 
-/// Send a command to all shards, prepending TAG_SHARD_MSG for channel routing.
+/// Send a shard-level command to all shards, prepending TAG_SHARD_CMD.
 fn broadcast_to_shards(state: &AppState, payload: &[u8]) {
     for shard_id in 0..state.shard_count {
         let mut msg = Vec::with_capacity(1 + payload.len());
-        msg.push(TAG_SHARD_MSG);
+        msg.push(TAG_SHARD_CMD);
         msg.extend_from_slice(payload);
-        // Best-effort: if a shard channel is full, log and skip
         if !state.channel_registry.try_send(shard_id, msg) {
             eprintln!(
                 "standing_queries: channel full for shard {} during broadcast",
@@ -128,12 +182,12 @@ async fn create_sq(
         sqs.insert(query_id, entry);
     }
 
-    // Send CreateSqSubscription to all shards
-    let create_cmd = encode_create_sq_command(query_id, req.include_cancellations, &req.query);
+    // Send RegisterSq to all shards
+    let create_cmd = encode_register_sq_command(query_id, req.include_cancellations, &req.query);
     broadcast_to_shards(&state, &create_cmd);
 
-    // Send UpdateStandingQueries to all shards
-    let update_cmd = encode_update_sq_command();
+    // Send UpdateSqs to all shards (broadcasts to awake nodes)
+    let update_cmd = encode_update_sqs_command();
     broadcast_to_shards(&state, &update_cmd);
 
     let id_str = format!("{:032x}", query_id);

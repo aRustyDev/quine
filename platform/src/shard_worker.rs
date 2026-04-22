@@ -2,7 +2,7 @@
 
 use crossbeam_channel::Receiver;
 
-use crate::channels::{ShardMsg, TAG_PERSIST_RESULT, TAG_SHARD_MSG, TAG_TIMER};
+use crate::channels::{ShardMsg, TAG_PERSIST_RESULT, TAG_SHARD_CMD, TAG_SHARD_MSG, TAG_TIMER};
 use crate::roc_glue;
 
 // ============================================================
@@ -48,7 +48,7 @@ pub fn run_shard_worker(shard_id: u32, rx: Receiver<ShardMsg>) {
                         let timer_kind = msg.get(1).copied().unwrap_or(0);
                         state = roc_glue::call_on_timer(state, timer_kind);
                     }
-                    TAG_SHARD_MSG | TAG_PERSIST_RESULT => {
+                    TAG_SHARD_MSG | TAG_SHARD_CMD | TAG_PERSIST_RESULT => {
                         state = roc_glue::call_handle_message(state, &msg);
                     }
                     _ => {
