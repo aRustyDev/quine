@@ -35,8 +35,8 @@ fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-// GetProps command tag (must match Roc Codec TAG_GET_PROPS = 0x06)
-const TAG_GET_PROPS: u8 = 0x06;
+// GetProps command tag (must match Roc Codec: GetProps = 0x01, GetEdges = 0x06)
+const TAG_GET_PROPS: u8 = 0x01;
 
 /// Encode a GetProps shard message:
 ///   [TAG_SHARD_MSG][qid_len:U16LE][qid_bytes...][TAG_GET_PROPS][reply_to:U64LE]

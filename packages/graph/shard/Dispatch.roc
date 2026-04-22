@@ -73,10 +73,15 @@ handle_literal = |node, cmd|
             new_list = List.append(existing, edge)
             new_edges = Dict.insert(node.edges, edge.edge_type, new_list)
             new_state = { node & edges: new_edges }
-            reciprocal = HalfEdge.reflect(edge, node.id)
-            send_reciprocal = SendToNode({ target: edge.other, msg: LiteralCmd(AddEdge({ edge: reciprocal, reply_to: 0 })) })
             reply = Reply({ request_id: reply_to, payload: Ack })
-            { state: new_state, effects: [reply, send_reciprocal] }
+            # Only send a reciprocal for originating commands (reply_to > 0).
+            # Reciprocals arrive with reply_to = 0 — sending another would loop.
+            if reply_to > 0 then
+                reciprocal = HalfEdge.reflect(edge, node.id)
+                send_reciprocal = SendToNode({ target: edge.other, msg: LiteralCmd(AddEdge({ edge: reciprocal, reply_to: 0 })) })
+                { state: new_state, effects: [reply, send_reciprocal] }
+            else
+                { state: new_state, effects: [reply] }
 
         RemoveEdge({ edge, reply_to }) ->
             existing = Dict.get(node.edges, edge.edge_type) |> Result.with_default([])
@@ -87,10 +92,13 @@ handle_literal = |node, cmd|
                 else
                     Dict.insert(node.edges, edge.edge_type, filtered)
             new_state = { node & edges: new_edges }
-            reciprocal = HalfEdge.reflect(edge, node.id)
-            send_reciprocal = SendToNode({ target: edge.other, msg: LiteralCmd(RemoveEdge({ edge: reciprocal, reply_to: 0 })) })
             reply = Reply({ request_id: reply_to, payload: Ack })
-            { state: new_state, effects: [reply, send_reciprocal] }
+            if reply_to > 0 then
+                reciprocal = HalfEdge.reflect(edge, node.id)
+                send_reciprocal = SendToNode({ target: edge.other, msg: LiteralCmd(RemoveEdge({ edge: reciprocal, reply_to: 0 })) })
+                { state: new_state, effects: [reply, send_reciprocal] }
+            else
+                { state: new_state, effects: [reply] }
 
         GetEdges({ reply_to }) ->
             all_edges = Dict.walk(node.edges, [], |acc, _key, edge_list| List.concat(acc, edge_list))
