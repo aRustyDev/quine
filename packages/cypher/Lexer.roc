@@ -261,7 +261,7 @@ lex_ident = |bytes, pos, acc|
                 |> List.map(to_lower_byte)
                 |> Str.from_utf8
                 |> Result.with_default(raw)
-            token = keyword_or_ident(lower)
+            token = keyword_or_ident_with_raw(lower, raw)
             lex_loop(bytes, end, List.append(acc, token))
 
         Err(_) ->
@@ -278,10 +278,12 @@ scan_ident = |bytes, pos|
         Ok(byte) if is_ident_continue(byte) -> scan_ident(bytes, pos + 1)
         _ -> pos
 
-## Map a keyword string to its token, or return Ident if not a keyword.
-keyword_or_ident : Str -> Token
-keyword_or_ident = |s|
-    when s is
+## Map a lowercased string to its keyword token, or return Ident with the
+## original (case-preserving) string. Keywords are case-insensitive but
+## identifiers (labels, edge types, aliases) must preserve original case.
+keyword_or_ident_with_raw : Str, Str -> Token
+keyword_or_ident_with_raw = |lower, raw|
+    when lower is
         "match" -> KwMatch
         "where" -> KwWhere
         "return" -> KwReturn
@@ -293,7 +295,7 @@ keyword_or_ident = |s|
         "as" -> KwAs
         "true" -> KwTrue
         "false" -> KwFalse
-        _ -> Ident(s)
+        _ -> Ident(raw)
 
 # ===== Character classification helpers =====
 
@@ -510,19 +512,19 @@ expect
 # Outgoing edge: -[:KNOWS]->
 expect
     when lex("-[:KNOWS]->") is
-        Ok([DashBracket, Colon, Ident("knows"), RBracket, DashArrowRight, Eof]) -> Bool.true
+        Ok([DashBracket, Colon, Ident("KNOWS"), RBracket, DashArrowRight, Eof]) -> Bool.true
         _ -> Bool.false
 
 # Incoming edge: <-[:KNOWS]-
 expect
     when lex("<-[:KNOWS]-") is
-        Ok([LeftArrowDash, LBracket, Colon, Ident("knows"), RBracket, Dash, Eof]) -> Bool.true
+        Ok([LeftArrowDash, LBracket, Colon, Ident("KNOWS"), RBracket, Dash, Eof]) -> Bool.true
         _ -> Bool.false
 
 # Undirected edge: -[:KNOWS]-
 expect
     when lex("-[:KNOWS]-") is
-        Ok([DashBracket, Colon, Ident("knows"), RBracket, Dash, Eof]) -> Bool.true
+        Ok([DashBracket, Colon, Ident("KNOWS"), RBracket, Dash, Eof]) -> Bool.true
         _ -> Bool.false
 
 # Untyped edge: -[]->
@@ -540,13 +542,13 @@ expect
 # Full query 2: MATCH (n:Person) WHERE n.age > 25 RETURN n.name, n.age
 expect
     when lex("MATCH (n:Person) WHERE n.age > 25 RETURN n.name, n.age") is
-        Ok([KwMatch, LParen, Ident("n"), Colon, Ident("person"), RParen, KwWhere, Ident("n"), Dot, Ident("age"), OpGt, LitInt(25), KwReturn, Ident("n"), Dot, Ident("name"), Comma, Ident("n"), Dot, Ident("age"), Eof]) -> Bool.true
+        Ok([KwMatch, LParen, Ident("n"), Colon, Ident("Person"), RParen, KwWhere, Ident("n"), Dot, Ident("age"), OpGt, LitInt(25), KwReturn, Ident("n"), Dot, Ident("name"), Comma, Ident("n"), Dot, Ident("age"), Eof]) -> Bool.true
         _ -> Bool.false
 
 # Full query 3: MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name
 expect
     when lex("MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name") is
-        Ok([KwMatch, LParen, Ident("a"), RParen, DashBracket, Colon, Ident("knows"), RBracket, DashArrowRight, LParen, Ident("b"), RParen, KwReturn, Ident("a"), Dot, Ident("name"), Comma, Ident("b"), Dot, Ident("name"), Eof]) -> Bool.true
+        Ok([KwMatch, LParen, Ident("a"), RParen, DashBracket, Colon, Ident("KNOWS"), RBracket, DashArrowRight, LParen, Ident("b"), RParen, KwReturn, Ident("a"), Dot, Ident("name"), Comma, Ident("b"), Dot, Ident("name"), Eof]) -> Bool.true
         _ -> Bool.false
 
 # Error: unclosed string
