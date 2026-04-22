@@ -709,3 +709,39 @@ expect
                 q.return_items == [WholeAlias("b")]
             List.len(q.pattern.steps) == 1 && is_comparison && is_single_return
         _ -> Bool.false
+
+# Error: missing RETURN (query ends after WHERE clause)
+expect
+    when parse_cypher("MATCH (n) WHERE n.name = \"Alice\"") is
+        Err(_) -> Bool.true
+        _ -> Bool.false
+
+# Error: missing MATCH (starts with node pattern directly)
+expect
+    when parse_cypher("(n) RETURN n") is
+        Err(_) -> Bool.true
+        _ -> Bool.false
+
+# Error: unclosed paren in node pattern
+expect
+    when parse_cypher("MATCH (n RETURN n") is
+        Err(_) -> Bool.true
+        _ -> Bool.false
+
+# Error: empty WHERE predicate (RETURN keyword where identifier expected)
+expect
+    when parse_cypher("MATCH (n) WHERE RETURN n") is
+        Err(_) -> Bool.true
+        _ -> Bool.false
+
+# Error: empty input
+expect
+    when parse_cypher("") is
+        Err(_) -> Bool.true
+        _ -> Bool.false
+
+# Error: garbage keyword after query
+expect
+    when parse_cypher("MATCH (n) RETURN n MATCH") is
+        Err(_) -> Bool.true
+        _ -> Bool.false
