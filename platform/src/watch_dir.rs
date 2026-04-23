@@ -1,14 +1,16 @@
 // platform/src/watch_dir.rs
 //
-// Pure helper functions for watch-directory ingest.
-// Filesystem watching logic (notify integration) lives here; the hot loop
-// that ties watching to the ingest pipeline will be added in a later task.
+// Watch-directory ingest: filesystem watching with notify, file ingestion,
+// and coordination with the ingest pipeline.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::channels::ChannelRegistry;
-use crate::ingest::{self, LineOutcome};
+use crate::ingest::{self, IngestSource, IngestStatus, LineOutcome};
 
 // ============================================================
 // File classification
@@ -163,6 +165,192 @@ pub fn ingest_single_file(
 }
 
 // ============================================================
+// Watch-directory ingest loop
+// ============================================================
+
+/// Ingest a single file and move it to `processed_dir` on success.
+///
+/// Returns true if the file was fully processed, false if cancelled,
+/// or logs and skips the file on error.
+fn process_and_move(
+    file: &Path,
+    job: &Arc<crate::ingest::IngestJob>,
+    registry: &ChannelRegistry,
+    shard_count: u32,
+    processed_dir: &Path,
+) {
+    match ingest_single_file(
+        file,
+        registry,
+        shard_count,
+        &job.cancel,
+        &job.records_processed,
+        &job.records_failed,
+    ) {
+        Ok(true) => {
+            // Fully processed — move to processed/
+            if let Err(e) = move_to_processed(file, processed_dir) {
+                eprintln!(
+                    "watch_dir {}: failed to move {} to processed: {}",
+                    job.name,
+                    file.display(),
+                    e
+                );
+            }
+        }
+        Ok(false) => {
+            // Cancelled mid-file — leave file in place, do not move
+        }
+        Err(e) => {
+            eprintln!(
+                "watch_dir {}: failed to open {}: {}",
+                job.name,
+                file.display(),
+                e
+            );
+            job.records_failed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Main watch-directory loop.
+///
+/// - Reads the watch path from `job.source` (must be `IngestSource::WatchDir`).
+/// - Creates a `processed/` subdirectory; returns an error status if it cannot.
+/// - Ingests any pre-existing `.jsonl` files, then starts watching for new ones.
+/// - Exits on cancel or watcher disconnect, setting status to `Cancelled`.
+pub fn run_watch_dir(
+    job: Arc<crate::ingest::IngestJob>,
+    registry: &ChannelRegistry,
+    shard_count: u32,
+) {
+    // Extract watch path from job source
+    let watch_path = match &job.source {
+        IngestSource::WatchDir { path } => path.clone(),
+        _ => {
+            *job.status.lock().unwrap() =
+                IngestStatus::Errored("run_watch_dir called with wrong IngestSource".into());
+            *job.completed_at.lock().unwrap() = Some(std::time::Instant::now());
+            return;
+        }
+    };
+
+    // Create processed/ subdirectory
+    let processed_dir = watch_path.join("processed");
+    if let Err(e) = std::fs::create_dir_all(&processed_dir) {
+        *job.status.lock().unwrap() =
+            IngestStatus::Errored(format!("failed to create processed dir: {}", e));
+        *job.completed_at.lock().unwrap() = Some(std::time::Instant::now());
+        return;
+    }
+
+    // Ingest any existing .jsonl files
+    for file in scan_existing_files(&watch_path) {
+        if job.cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        process_and_move(&file, &job, registry, shard_count, &processed_dir);
+    }
+
+    // Set up notify watcher with an std::sync::mpsc channel
+    let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
+    let mut watcher = match RecommendedWatcher::new(
+        move |res| {
+            let _ = tx.send(res);
+        },
+        Config::default(),
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            *job.status.lock().unwrap() =
+                IngestStatus::Errored(format!("failed to create watcher: {}", e));
+            *job.completed_at.lock().unwrap() = Some(std::time::Instant::now());
+            return;
+        }
+    };
+
+    if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
+        *job.status.lock().unwrap() =
+            IngestStatus::Errored(format!("failed to watch directory: {}", e));
+        *job.completed_at.lock().unwrap() = Some(std::time::Instant::now());
+        return;
+    }
+
+    eprintln!(
+        "watch_dir {}: watching {} for new .jsonl files",
+        job.name,
+        watch_path.display()
+    );
+
+    // Event loop
+    loop {
+        if job.cancel.load(Ordering::Relaxed) {
+            break;
+        }
+
+        match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            Ok(Ok(event)) => {
+                // Filter to Create and Modify(Name) events only
+                let interesting = matches!(
+                    event.kind,
+                    EventKind::Create(_)
+                        | EventKind::Modify(notify::event::ModifyKind::Name(_))
+                );
+
+                if !interesting {
+                    continue;
+                }
+
+                for path in event.paths {
+                    if job.cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if path.is_file() && is_jsonl_file(&path) {
+                        process_and_move(&path, &job, registry, shard_count, &processed_dir);
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                eprintln!("watch_dir {}: watcher error: {}", job.name, e);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Normal — check cancel flag and loop
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Watcher dropped or channel closed — exit
+                eprintln!("watch_dir {}: watcher disconnected, stopping", job.name);
+                break;
+            }
+        }
+    }
+
+    *job.status.lock().unwrap() = IngestStatus::Cancelled;
+    *job.completed_at.lock().unwrap() = Some(std::time::Instant::now());
+    eprintln!(
+        "watch_dir {}: stopped ({} processed, {} failed)",
+        job.name,
+        job.records_processed.load(Ordering::Relaxed),
+        job.records_failed.load(Ordering::Relaxed),
+    );
+}
+
+/// Spawn a background thread that calls `run_watch_dir`.
+///
+/// Mirrors `ingest::start_file_ingest`; the thread is named
+/// `watch-dir-{job.name}`.
+pub fn start_watch_dir_ingest(
+    job: Arc<crate::ingest::IngestJob>,
+    registry: &'static ChannelRegistry,
+    shard_count: u32,
+) {
+    let name = format!("watch-dir-{}", job.name);
+    std::thread::Builder::new()
+        .name(name)
+        .spawn(move || run_watch_dir(job, registry, shard_count))
+        .expect("failed to spawn watch-dir ingest thread");
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
@@ -311,5 +499,55 @@ mod tests {
         assert_eq!(result.unwrap(), true);
         assert_eq!(processed.load(Ordering::Relaxed), 2);
         assert_eq!(failed.load(Ordering::Relaxed), 1);
+    }
+
+    // ---- process_and_move integration test ----
+
+    #[test]
+    fn process_and_move_full_flow() {
+        use crate::ingest::{IngestJob, IngestSource, IngestStatus};
+        use std::sync::Mutex;
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let watch_path = dir.path().to_path_buf();
+        let processed_dir = watch_path.join("processed");
+        std::fs::create_dir_all(&processed_dir).unwrap();
+
+        // Create a .jsonl file with one valid record
+        let file = watch_path.join("events.jsonl");
+        let mut f = std::fs::File::create(&file).unwrap();
+        writeln!(f, "{}", valid_line("charlie")).unwrap();
+        drop(f);
+
+        // Build a minimal IngestJob with WatchDir source
+        let job = Arc::new(IngestJob {
+            name: "test-watch".into(),
+            source: IngestSource::WatchDir {
+                path: watch_path.clone(),
+            },
+            status: Mutex::new(IngestStatus::Running),
+            records_processed: AtomicU64::new(0),
+            records_failed: AtomicU64::new(0),
+            cancel: Arc::new(AtomicBool::new(false)),
+            started_at: Instant::now(),
+            completed_at: Mutex::new(None),
+        });
+
+        let registry = make_registry();
+
+        // Call process_and_move directly
+        process_and_move(&file, &job, &registry, 4, &processed_dir);
+
+        // One record processed, none failed
+        assert_eq!(job.records_processed.load(Ordering::Relaxed), 1);
+        assert_eq!(job.records_failed.load(Ordering::Relaxed), 0);
+
+        // Source file should have moved to processed/
+        assert!(!file.exists(), "source file should be gone");
+        assert!(
+            processed_dir.join("events.jsonl").exists(),
+            "processed/ should contain the moved file"
+        );
     }
 }
