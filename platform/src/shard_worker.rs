@@ -2,7 +2,7 @@
 
 use crossbeam_channel::Receiver;
 
-use crate::channels::{ShardMsg, TAG_PERSIST_RESULT, TAG_SHARD_CMD, TAG_SHARD_MSG, TAG_TIMER};
+use crate::channels::{ShardMsg, TAG_PERSIST_RESULT, TAG_SHARD_CMD, TAG_SHARD_MSG, TAG_SHUTDOWN, TAG_TIMER};
 use crate::roc_glue;
 
 // ============================================================
@@ -44,6 +44,33 @@ pub fn run_shard_worker(shard_id: u32, rx: Receiver<ShardMsg>) {
                 }
 
                 match msg[0] {
+                    TAG_SHUTDOWN => {
+                        eprintln!("shard {}: received shutdown, persisting all nodes", shard_id);
+                        // Roc handle_message sees TAG_SHUTDOWN and calls persist_all_awake,
+                        // which generates PersistSnapshot effects dispatched via roc_fx_persist_async.
+                        state = roc_glue::call_handle_message(state, &msg);
+                        crate::effects::drain_effects(shard_id);
+                        // Drain remaining messages (persist results, etc.) non-blocking
+                        while let Ok(remaining) = rx.try_recv() {
+                            if remaining.is_empty() {
+                                continue;
+                            }
+                            match remaining[0] {
+                                TAG_SHARD_MSG | TAG_SHARD_CMD | TAG_PERSIST_RESULT => {
+                                    state = roc_glue::call_handle_message(state, &remaining);
+                                    crate::effects::drain_effects(shard_id);
+                                }
+                                TAG_TIMER => {
+                                    let timer_kind = remaining.get(1).copied().unwrap_or(0);
+                                    state = roc_glue::call_on_timer(state, timer_kind);
+                                    crate::effects::drain_effects(shard_id);
+                                }
+                                _ => {}
+                            }
+                        }
+                        eprintln!("shard {}: shutdown complete", shard_id);
+                        break;
+                    }
                     TAG_TIMER => {
                         let timer_kind = msg.get(1).copied().unwrap_or(0);
                         state = roc_glue::call_on_timer(state, timer_kind);

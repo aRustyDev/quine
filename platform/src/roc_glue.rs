@@ -218,6 +218,11 @@ pub fn persist_sender_ready() -> bool {
     PERSIST_SENDER.get().is_some()
 }
 
+/// Get a reference to the persist sender (for shutdown flush).
+pub fn persist_sender() -> Option<&'static crossbeam_channel::Sender<PersistCommand>> {
+    PERSIST_SENDER.get()
+}
+
 // ============================================================
 // Global SQ result sender — used by roc_fx_emit_sq_result.
 // ============================================================
@@ -346,7 +351,7 @@ pub extern "C" fn roc_fx_persist_async(cmd: &RocList<u8>) -> u64 {
     let shard_id = crate::shard_worker::current_shard_id();
     let payload = cmd.as_slice().to_vec();
 
-    let command = PersistCommand {
+    let command = PersistCommand::Execute {
         request_id,
         shard_id,
         payload,

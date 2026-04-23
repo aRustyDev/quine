@@ -35,6 +35,9 @@ tag_shard_cmd = 0x02
 tag_persist_result : U8
 tag_persist_result = 0xFE
 
+tag_shutdown : U8
+tag_shutdown = 0xFD
+
 ## Create a new shard with default configuration.
 ## Queries the host for the configured shard count.
 init_shard! : U32 => ShardState
@@ -58,6 +61,8 @@ handle_message! = |state, msg|
                 handle_shard_cmd!(state, msg)
             else if tag == tag_persist_result then
                 handle_persist_result!(state, msg)
+            else if tag == tag_shutdown then
+                handle_shutdown!(state)
             else
                 Effect.log!(1, "graph-app: unknown tag 0x$(u8_to_hex(tag))")
                 state
@@ -135,6 +140,14 @@ on_timer! : ShardState, U8 => ShardState
 on_timer! = |state, _kind|
     now = Effect.current_time!({})
     updated = ShardState.on_timer(state, now)
+    drain_effects!(updated)
+
+## Handle graceful shutdown: persist all awake nodes and drain effects.
+handle_shutdown! : ShardState => ShardState
+handle_shutdown! = |state|
+    now = Effect.current_time!({})
+    Effect.log!(2, "graph-app: shutdown — persisting all awake nodes")
+    updated = ShardState.persist_all_awake(state, now)
     drain_effects!(updated)
 
 ## Handle a persistence result: decode the response and complete node wake.

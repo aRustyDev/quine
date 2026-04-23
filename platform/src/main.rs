@@ -13,8 +13,14 @@ mod roc_glue;
 mod shard_worker;
 mod timer;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use channels::ChannelRegistry;
 use config::PlatformConfig;
+
+/// Global shutdown flag, set by the signal handler.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     roc_glue::init();
@@ -156,13 +162,13 @@ fn main() {
 
     // If --ingest stdin was passed, auto-start a stdin ingest job.
     if has_stdin_ingest_flag() {
-        let job = std::sync::Arc::new(ingest::IngestJob {
+        let job = Arc::new(ingest::IngestJob {
             name: "stdin".into(),
             source: ingest::IngestSource::Stdin,
             status: std::sync::Mutex::new(ingest::IngestStatus::Running),
             records_processed: std::sync::atomic::AtomicU64::new(0),
             records_failed: std::sync::atomic::AtomicU64::new(0),
-            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)),
             started_at: std::time::Instant::now(),
             completed_at: std::sync::Mutex::new(None),
         });
@@ -175,10 +181,97 @@ fn main() {
         eprintln!("stdin ingest: reading JSONL from stdin");
     }
 
-    // Keep main thread alive until all workers finish.
-    // Workers block forever on recv until channels are closed.
+    // Spawn a dedicated thread to catch SIGINT/SIGTERM and initiate shutdown.
+    let shutdown_registry = roc_glue::channel_registry();
+    let shutdown_shard_count = config.shard_count;
+    let shutdown_ingest_jobs = api_state.ingest_jobs.clone();
+    std::thread::Builder::new()
+        .name("signal-handler".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime for signal handler");
+            rt.block_on(async {
+                wait_for_shutdown_signal().await;
+            });
+
+            if SHUTDOWN.swap(true, Ordering::SeqCst) {
+                // Already shutting down (double signal) — force exit
+                eprintln!("shutdown: forced exit (double signal)");
+                std::process::exit(1);
+            }
+
+            eprintln!("shutdown: signal received, initiating graceful shutdown");
+
+            // 1. Cancel all ingest jobs
+            if let Ok(jobs) = shutdown_ingest_jobs.lock() {
+                for (name, job) in jobs.iter() {
+                    eprintln!("shutdown: cancelling ingest job '{}'", name);
+                    job.cancel.store(true, Ordering::Relaxed);
+                }
+            }
+
+            // 2. Send TAG_SHUTDOWN to each shard channel
+            for shard_id in 0..shutdown_shard_count {
+                let msg = vec![channels::TAG_SHUTDOWN];
+                if shutdown_registry.sender(shard_id).send(msg).is_err() {
+                    eprintln!("shutdown: failed to send shutdown to shard {}", shard_id);
+                }
+            }
+        })
+        .expect("failed to spawn signal handler thread");
+
+    // Keep main thread alive until all shard workers finish.
+    // Workers exit after processing TAG_SHUTDOWN.
     for handle in handles {
         handle.join().expect("shard worker panicked");
+    }
+
+    // If shutdown was triggered, flush the persistence pool.
+    if SHUTDOWN.load(Ordering::SeqCst) {
+        eprintln!("shutdown: shard workers stopped, flushing persistence");
+        flush_persistence_pool();
+        eprintln!("shutdown: complete");
+    }
+}
+
+/// Wait for SIGINT or SIGTERM.
+async fn wait_for_shutdown_signal() {
+    use tokio::signal;
+
+    let ctrl_c = signal::ctrl_c();
+
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.expect("failed to listen for Ctrl+C");
+    }
+}
+
+/// Send a flush sentinel to the persistence pool and wait for it to drain.
+fn flush_persistence_pool() {
+    if let Some(tx) = roc_glue::persist_sender() {
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let flush = persistence_io::PersistCommand::Flush { done: done_tx };
+        if tx.send(flush).is_err() {
+            eprintln!("shutdown: persistence pool already closed");
+            return;
+        }
+        match done_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(()) => eprintln!("shutdown: persistence flush complete"),
+            Err(_) => eprintln!("shutdown: persistence flush timed out after 30s"),
+        }
     }
 }
 

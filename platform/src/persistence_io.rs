@@ -13,10 +13,17 @@ use crate::channels::{ShardMsg, TAG_PERSIST_RESULT};
 const SNAPSHOTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("snapshots");
 
 /// A command sent from a shard worker to the persistence pool.
-pub struct PersistCommand {
-    pub request_id: u64,
-    pub shard_id: u32,
-    pub payload: Vec<u8>,
+pub enum PersistCommand {
+    /// Execute a persistence operation (snapshot store/load).
+    Execute {
+        request_id: u64,
+        shard_id: u32,
+        payload: Vec<u8>,
+    },
+    /// Drain all pending commands and signal completion. Used during shutdown.
+    Flush {
+        done: std::sync::mpsc::SyncSender<()>,
+    },
 }
 
 /// Global atomic counter for generating unique request IDs.
@@ -67,7 +74,14 @@ fn run_persistence_loop(
 ) {
     loop {
         match cmd_rx.recv() {
-            Ok(cmd) => process_command(&db, &shard_senders, cmd),
+            Ok(cmd @ PersistCommand::Execute { .. }) => {
+                process_command(&db, &shard_senders, cmd);
+            }
+            Ok(PersistCommand::Flush { done }) => {
+                eprintln!("persistence pool: flush complete, shutting down");
+                let _ = done.send(());
+                break;
+            }
             Err(_) => {
                 eprintln!("persistence pool: command channel closed, shutting down");
                 break;
@@ -86,14 +100,22 @@ fn process_command(
     shard_senders: &[Sender<ShardMsg>],
     cmd: PersistCommand,
 ) {
-    if cmd.payload.is_empty() {
+    let (shard_id, payload) = match cmd {
+        PersistCommand::Execute { shard_id, payload, .. } => (shard_id, payload),
+        PersistCommand::Flush { .. } => {
+            // Flush is handled in the loop, not here
+            return;
+        }
+    };
+
+    if payload.is_empty() {
         eprintln!("persistence pool: empty payload, ignoring");
         return;
     }
 
-    match cmd.payload[0] {
-        0x01 => handle_persist_snapshot(db, &cmd.payload),
-        0x02 => handle_load_snapshot(db, shard_senders, cmd.shard_id, &cmd.payload),
+    match payload[0] {
+        0x01 => handle_persist_snapshot(db, &payload),
+        0x02 => handle_load_snapshot(db, shard_senders, shard_id, &payload),
         tag => {
             eprintln!("persistence pool: unknown command tag 0x{:02X}", tag);
         }
@@ -240,7 +262,7 @@ mod tests {
 
         // PersistSnapshot: [0x01][id_len:2][id:0xAB,0xCD][snapshot:0x01,0x02,0x03]
         let persist_payload = vec![0x01, 2, 0, 0xAB, 0xCD, 0x01, 0x02, 0x03];
-        process_command(&db, &shard_senders, PersistCommand {
+        process_command(&db, &shard_senders, PersistCommand::Execute {
             request_id: 1,
             shard_id: 0,
             payload: persist_payload,
@@ -248,7 +270,7 @@ mod tests {
 
         // LoadSnapshot: [0x02][id_len:2][id:0xAB,0xCD]
         let load_payload = vec![0x02, 2, 0, 0xAB, 0xCD];
-        process_command(&db, &shard_senders, PersistCommand {
+        process_command(&db, &shard_senders, PersistCommand::Execute {
             request_id: 2,
             shard_id: 0,
             payload: load_payload,
@@ -274,7 +296,7 @@ mod tests {
         let shard_senders = vec![tx];
 
         let load_payload = vec![0x02, 1, 0, 0xFF];
-        process_command(&db, &shard_senders, PersistCommand {
+        process_command(&db, &shard_senders, PersistCommand::Execute {
             request_id: 1,
             shard_id: 0,
             payload: load_payload,
@@ -293,7 +315,7 @@ mod tests {
 
         // Write version 1
         let persist1 = vec![0x01, 1, 0, 0x01, 0xAA];
-        process_command(&db, &shard_senders, PersistCommand {
+        process_command(&db, &shard_senders, PersistCommand::Execute {
             request_id: 1,
             shard_id: 0,
             payload: persist1,
@@ -301,7 +323,7 @@ mod tests {
 
         // Overwrite with version 2
         let persist2 = vec![0x01, 1, 0, 0x01, 0xBB, 0xCC];
-        process_command(&db, &shard_senders, PersistCommand {
+        process_command(&db, &shard_senders, PersistCommand::Execute {
             request_id: 2,
             shard_id: 0,
             payload: persist2,
@@ -309,7 +331,7 @@ mod tests {
 
         // Load should return version 2
         let load = vec![0x02, 1, 0, 0x01];
-        process_command(&db, &shard_senders, PersistCommand {
+        process_command(&db, &shard_senders, PersistCommand::Execute {
             request_id: 3,
             shard_id: 0,
             payload: load,
@@ -323,6 +345,55 @@ mod tests {
     }
 
     #[test]
+    fn flush_drains_pending_commands() {
+        let (_dir, db) = temp_db();
+        let (shard_tx, _shard_rx) = crossbeam_channel::bounded(16);
+        let shard_senders = vec![shard_tx];
+
+        // Mimic the real setup: spawn persistence on a dedicated thread with its own runtime
+        let db_clone = db.clone();
+        let (cmd_tx, done_rx) = {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let cmd_tx = start_persistence_pool(shard_senders, &rt, db_clone);
+            let tx = cmd_tx.clone();
+
+            // Keep the runtime alive on a background thread
+            std::thread::spawn(move || {
+                rt.block_on(std::future::pending::<()>());
+            });
+
+            // Send some persist commands, then flush
+            let persist1 = vec![0x01, 1, 0, 0x01, 0xAA];
+            tx.send(PersistCommand::Execute {
+                request_id: 1,
+                shard_id: 0,
+                payload: persist1,
+            }).unwrap();
+
+            let persist2 = vec![0x01, 1, 0, 0x02, 0xBB];
+            tx.send(PersistCommand::Execute {
+                request_id: 2,
+                shard_id: 0,
+                payload: persist2,
+            }).unwrap();
+
+            // Send flush and wait for completion
+            let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+            tx.send(PersistCommand::Flush { done: done_tx }).unwrap();
+
+            (cmd_tx, done_rx)
+        };
+
+        // Should complete within a reasonable time
+        done_rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("flush should complete");
+        drop(cmd_tx);
+    }
+
+    #[test]
     fn database_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("reopen.redb");
@@ -332,7 +403,7 @@ mod tests {
             let db = open_database(&db_path);
             let persist = vec![0x01, 1, 0, 0x42, 0xDE, 0xAD];
             let (tx, _rx) = crossbeam_channel::bounded(16);
-            process_command(&db, &[tx], PersistCommand {
+            process_command(&db, &[tx], PersistCommand::Execute {
                 request_id: 1,
                 shard_id: 0,
                 payload: persist,
@@ -344,7 +415,7 @@ mod tests {
             let db = open_database(&db_path);
             let (tx, rx) = crossbeam_channel::bounded(16);
             let load = vec![0x02, 1, 0, 0x42];
-            process_command(&db, &[tx], PersistCommand {
+            process_command(&db, &[tx], PersistCommand::Execute {
                 request_id: 2,
                 shard_id: 0,
                 payload: load,

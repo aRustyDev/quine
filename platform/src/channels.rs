@@ -8,6 +8,7 @@ pub const TAG_SHARD_MSG: u8 = 0x01;
 pub const TAG_SHARD_CMD: u8 = 0x02;
 pub const TAG_TIMER: u8 = 0xFF;
 pub const TAG_PERSIST_RESULT: u8 = 0xFE;
+pub const TAG_SHUTDOWN: u8 = 0xFD;
 
 /// A tagged message on a shard's channel. The first byte is a tag
 /// distinguishing shard messages from timer ticks and persist results.

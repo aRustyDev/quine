@@ -5,6 +5,7 @@ module [
     start_wake,
     complete_wake,
     build_sq_snapshot,
+    force_persist_snapshot,
 ]
 
 import id.QuineId exposing [QuineId]
@@ -85,6 +86,14 @@ begin_sleep = |nodes, qid, now, config|
 complete_sleep : Dict QuineId NodeEntry, QuineId -> Dict QuineId NodeEntry
 complete_sleep = |nodes, qid|
     Dict.remove(nodes, qid)
+
+## Create a PersistSnapshot effect for a node unconditionally.
+## Used during shutdown to persist all nodes regardless of activity thresholds.
+force_persist_snapshot : QuineId, NodeState, U64 -> Effect
+force_persist_snapshot = |qid, state, now|
+    snapshot = create_snapshot(state, now)
+    snapshot_bytes = Codec.encode_node_snapshot(snapshot)
+    Persist({ command: PersistSnapshot({ id: qid, snapshot_bytes }) })
 
 ## Begin waking a node that is currently asleep.
 ##
@@ -406,3 +415,14 @@ expect
     sq_states = Dict.insert(Dict.empty({}), key, sq_node_state)
     entries = build_sq_snapshot(sq_states)
     List.len(entries) == 1
+
+expect
+    # force_persist_snapshot produces a Persist effect with non-empty snapshot_bytes
+    qid = QuineId.from_bytes([0x01])
+    pv = PropertyValue.from_value(Str("shutdown"))
+    ns = empty_node_state(qid)
+    state = { ns & properties: Dict.insert(ns.properties, "name", pv) }
+    effect = force_persist_snapshot(qid, state, 5000u64)
+    when effect is
+        Persist({ command: PersistSnapshot({ snapshot_bytes }) }) -> !(List.is_empty(snapshot_bytes))
+        _ -> Bool.false

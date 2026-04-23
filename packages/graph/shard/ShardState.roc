@@ -5,6 +5,7 @@ module [
     handle_message,
     on_timer,
     complete_node_wake,
+    persist_all_awake,
     pending_effects,
     clear_effects,
     node_entry,
@@ -198,11 +199,25 @@ complete_node_wake = |@ShardState(s), qid, maybe_snapshot, now|
                             }
                         _ -> acc,
             )
+            # Install SQ subscriptions for all running queries on the newly woken node.
+            # Nodes lose their subscriber lists on sleep; this re-establishes them.
+            sq_effects = Dict.walk(s.running_queries, [], |acc, _sq_id, running_query|
+                subscriber : SqMsgSubscriber
+                subscriber = GlobalSubscriber({ global_id: running_query.id })
+                sq_msg : NodeMessage
+                sq_msg = SqCmd(CreateSqSubscription({
+                    subscriber,
+                    query: running_query.query,
+                    global_id: running_query.id,
+                }))
+                List.append(acc, SendToNode({ target: qid, msg: sq_msg }))
+            )
+            combined_effects = List.concat(all_effects, sq_effects)
             new_lru = Lru.touch(s.lru_entries, qid, now, 0)
             @ShardState({ s &
                 nodes: final_nodes,
                 lru_entries: new_lru,
-                pending_effects: all_effects,
+                pending_effects: combined_effects,
             })
 
         _ ->
@@ -347,6 +362,19 @@ broadcast_update_standing_queries = |@ShardState(s)|
     )
     @ShardState({ s & pending_effects: List.concat(s.pending_effects, effects) })
 
+## Persist all awake nodes unconditionally (for graceful shutdown).
+## Generates a PersistSnapshot effect for each awake node, bypassing
+## activity thresholds. Waking nodes are ignored (they have no live state).
+persist_all_awake : ShardState, U64 -> ShardState
+persist_all_awake = |@ShardState(s), now|
+    effects = Dict.walk(s.nodes, [], |acc, qid, entry|
+        when entry is
+            Awake({ state }) ->
+                List.append(acc, SleepWake.force_persist_snapshot(qid, state, now))
+            _ -> acc
+    )
+    @ShardState({ s & pending_effects: List.concat(s.pending_effects, effects) })
+
 ## Return all node IDs in this shard (for broadcast).
 all_node_ids : ShardState -> List QuineId
 all_node_ids = |@ShardState(s)|
@@ -478,6 +506,43 @@ expect
     send_count == 2
 
 expect
+    # persist_all_awake generates PersistSnapshot for each awake node
+    shard = new(0, 4, default_config)
+    qid1 = QuineId.from_bytes([0x01])
+    qid2 = QuineId.from_bytes([0x02])
+    ns1 = empty_node_state(qid1)
+    ns2 = empty_node_state(qid2)
+    awake1 : NodeEntry
+    awake1 = Awake({ state: ns1, wakeful: Awake, cost_to_sleep: 0, last_write: 100, last_access: 100 })
+    awake2 : NodeEntry
+    awake2 = Awake({ state: ns2, wakeful: Awake, cost_to_sleep: 0, last_write: 100, last_access: 100 })
+    shard2 = with_awake_node(shard, qid1, awake1)
+    shard3 = with_awake_node(shard2, qid2, awake2)
+    shard4 = persist_all_awake(shard3, 2000u64)
+    effects = pending_effects(shard4)
+    persist_count = List.count_if(effects, |e|
+        when e is
+            Persist({ command: PersistSnapshot(_) }) -> Bool.true
+            _ -> Bool.false)
+    persist_count == 2
+
+expect
+    # persist_all_awake with no nodes produces no effects
+    shard = new(0, 4, default_config)
+    shard2 = persist_all_awake(shard, 2000u64)
+    List.is_empty(pending_effects(shard2))
+
+expect
+    # persist_all_awake ignores Waking nodes
+    shard = new(0, 4, default_config)
+    qid = QuineId.from_bytes([0x05])
+    waking_entry : NodeEntry
+    waking_entry = Waking({ queued: [] })
+    shard2 = with_awake_node(shard, qid, waking_entry)
+    shard3 = persist_all_awake(shard2, 2000u64)
+    List.is_empty(pending_effects(shard3))
+
+expect
     # drain_sq_results returns buffered results and clears the buffer
     shard = new(0, 4, default_config)
     result1 : StandingQueryResult
@@ -514,6 +579,40 @@ expect
                 Ok(_) -> Bool.true
                 Err(_) -> Bool.false
         _ -> Bool.false
+
+expect
+    # complete_node_wake generates CreateSqSubscription for running queries
+    config = default_config
+    shard = new(0u32, 4u32, config)
+    query : MvStandingQuery
+    query = LocalProperty({ prop_key: "name", constraint: Any, aliased_as: Ok("n") })
+    shard2 = register_standing_query(shard, 1u128, query, Bool.true)
+    qid = QuineId.from_bytes([0x03])
+    waking_entry : NodeEntry
+    waking_entry = Waking({ queued: [] })
+    shard3 = with_awake_node(shard2, qid, waking_entry)
+    shard4 = complete_node_wake(shard3, qid, None, 2000u64)
+    effects = pending_effects(shard4)
+    List.any(effects, |e|
+        when e is
+            SendToNode({ msg: SqCmd(CreateSqSubscription(_)) }) -> Bool.true
+            _ -> Bool.false)
+
+expect
+    # complete_node_wake with no running queries produces no SQ effects
+    config = default_config
+    shard = new(0u32, 4u32, config)
+    qid = QuineId.from_bytes([0x04])
+    waking_entry : NodeEntry
+    waking_entry = Waking({ queued: [] })
+    shard2 = with_awake_node(shard, qid, waking_entry)
+    shard3 = complete_node_wake(shard2, qid, None, 2000u64)
+    effects = pending_effects(shard3)
+    sq_count = List.count_if(effects, |e|
+        when e is
+            SendToNode({ msg: SqCmd(CreateSqSubscription(_)) }) -> Bool.true
+            _ -> Bool.false)
+    sq_count == 0
 
 expect
     # complete_node_wake on non-Waking node returns unchanged state
