@@ -13,7 +13,7 @@ use super::eval::{self, HalfEdge, NodeData, Row};
 use super::expr::{self, QuineValue};
 use super::plan::{Direction, PlanStep, ProjectItem, QueryPlan};
 use crate::api::PendingRequests;
-use crate::channels::{ChannelRegistry, TAG_SHARD_MSG};
+use crate::channels::{ChannelRegistry, TAG_SHARD_CMD, TAG_SHARD_MSG};
 use crate::quine_id;
 
 // ===== Error Type =====
@@ -63,6 +63,96 @@ fn encode_get_node_state(qid: &[u8; 16], request_id: u64) -> Vec<u8> {
     buf.push(TAG_GET_NODE_STATE);
     buf.extend_from_slice(&request_id.to_le_bytes());
     buf
+}
+
+// ===== PlanQuery Encoding =====
+
+/// Shard command sub-tag for PlanQuery (matches Codec.decode_shard_cmd tag 0x04).
+const CMD_PLAN_QUERY: u8 = 0x04;
+
+/// Encode a PlanQuery shard command.
+///
+/// Wire format:
+///   [TAG_SHARD_CMD (0x02)]
+///   [CMD_PLAN_QUERY (0x04)]
+///   [reply_to: U64LE]
+///   [query_len: U16LE]
+///   [query_utf8...]
+///   [hint_count: U16LE]
+///   [hint_qid: 16 bytes] * hint_count
+fn encode_plan_query(query: &str, hint_qids: &[[u8; 16]], request_id: u64) -> Vec<u8> {
+    let query_bytes = query.as_bytes();
+    let capacity = 1 + 1 + 8 + 2 + query_bytes.len() + 2 + hint_qids.len() * 16;
+    let mut buf = Vec::with_capacity(capacity);
+    buf.push(TAG_SHARD_CMD);
+    buf.push(CMD_PLAN_QUERY);
+    buf.extend_from_slice(&request_id.to_le_bytes());
+    buf.extend_from_slice(&(query_bytes.len() as u16).to_le_bytes());
+    buf.extend_from_slice(query_bytes);
+    buf.extend_from_slice(&(hint_qids.len() as u16).to_le_bytes());
+    for qid in hint_qids {
+        buf.extend_from_slice(qid);
+    }
+    buf
+}
+
+/// Send a Cypher query to shard 0 for planning. Returns the decoded QueryPlan.
+pub async fn plan_query(
+    query: &str,
+    hint_qids: &[[u8; 16]],
+    pending: &PendingRequests,
+    registry: &'static ChannelRegistry,
+) -> Result<QueryPlan, ExecuteError> {
+    let request_id = next_request_id();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+
+    // Register pending request
+    {
+        let mut map = pending.lock().unwrap();
+        map.insert(request_id, tx);
+    }
+
+    // Encode and send PlanQuery to shard 0
+    let msg = encode_plan_query(query, hint_qids, request_id);
+    if !registry.try_send(0, msg) {
+        let mut map = pending.lock().unwrap();
+        map.remove(&request_id);
+        return Err(ExecuteError::ShardUnavailable);
+    }
+
+    // Await reply with 10s timeout (longer than node queries)
+    let timeout_dur = Duration::from_secs(10);
+    match tokio::time::timeout(timeout_dur, rx).await {
+        Ok(Ok(payload)) => {
+            // Check for error reply: first byte 0xFF
+            if !payload.is_empty() && payload[0] == 0xFF {
+                let len = if payload.len() >= 3 {
+                    u16::from_le_bytes([payload[1], payload[2]]) as usize
+                } else {
+                    0
+                };
+                let error_msg = if len > 0 && 3 + len <= payload.len() {
+                    String::from_utf8_lossy(&payload[3..3 + len]).into_owned()
+                } else {
+                    "unknown plan error".to_string()
+                };
+                Err(ExecuteError::PlanError(error_msg))
+            } else {
+                super::plan::decode_plan(&payload)
+                    .map_err(|e| ExecuteError::PlanDecode(format!("{:?}", e)))
+            }
+        }
+        Ok(Err(_)) => {
+            // Sender dropped — shard didn't reply
+            Err(ExecuteError::ShardTimeout)
+        }
+        Err(_) => {
+            // Timeout — clean up pending
+            let mut map = pending.lock().unwrap();
+            map.remove(&request_id);
+            Err(ExecuteError::ShardTimeout)
+        }
+    }
 }
 
 // ===== Wire Format Helpers =====
@@ -702,5 +792,48 @@ mod tests {
         let result = exec_project(&rows, &items, &aliases);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["name"], "Alice");
+    }
+
+    // ---- Task 6 Tests: PlanQuery encoding ----
+
+    #[test]
+    fn encode_plan_query_wire_format() {
+        let msg = encode_plan_query("MATCH (n) RETURN n", &[], 42);
+        assert_eq!(msg[0], 0x02); // TAG_SHARD_CMD
+        assert_eq!(msg[1], 0x04); // CMD_PLAN_QUERY
+        assert_eq!(u64::from_le_bytes(msg[2..10].try_into().unwrap()), 42);
+        let query_len = u16::from_le_bytes([msg[10], msg[11]]) as usize;
+        assert_eq!(query_len, 18);
+        assert_eq!(&msg[12..12 + query_len], b"MATCH (n) RETURN n");
+        let hint_offset = 12 + query_len;
+        let hint_count = u16::from_le_bytes([msg[hint_offset], msg[hint_offset + 1]]);
+        assert_eq!(hint_count, 0);
+    }
+
+    #[test]
+    fn encode_plan_query_with_hints() {
+        let hint1 = [0xAA; 16];
+        let hint2 = [0xBB; 16];
+        let msg = encode_plan_query("MATCH (n) RETURN n", &[hint1, hint2], 1);
+        let query_len = u16::from_le_bytes([msg[10], msg[11]]) as usize;
+        let hint_offset = 12 + query_len;
+        let hint_count = u16::from_le_bytes([msg[hint_offset], msg[hint_offset + 1]]);
+        assert_eq!(hint_count, 2);
+        let h1_start = hint_offset + 2;
+        assert_eq!(&msg[h1_start..h1_start + 16], &[0xAA; 16]);
+        let h2_start = h1_start + 16;
+        assert_eq!(&msg[h2_start..h2_start + 16], &[0xBB; 16]);
+    }
+
+    #[test]
+    fn plan_error_reply_decoding() {
+        let error_msg = "parse error";
+        let mut payload = vec![0xFF];
+        payload.extend_from_slice(&(error_msg.len() as u16).to_le_bytes());
+        payload.extend_from_slice(error_msg.as_bytes());
+        assert_eq!(payload[0], 0xFF);
+        let len = u16::from_le_bytes([payload[1], payload[2]]) as usize;
+        let decoded = String::from_utf8_lossy(&payload[3..3 + len]);
+        assert_eq!(decoded, "parse error");
     }
 }
