@@ -242,6 +242,32 @@ mod tests {
         assert_eq!(json["status"], "cancelled");
     }
 
+    #[tokio::test]
+    async fn create_stdin_ingest() {
+        let state = test_state();
+        let app = app(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"stdin-test","type":"stdin"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["name"], "stdin-test");
+        assert_eq!(json["status"], "running");
+    }
+
     // ---- Standing Query Endpoint Tests ----
 
     #[tokio::test]

@@ -97,6 +97,7 @@ async fn create_ingest(
             })?;
             IngestSource::Inline { data }
         }
+        "stdin" => IngestSource::Stdin,
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,

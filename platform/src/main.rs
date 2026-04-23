@@ -129,7 +129,8 @@ fn main() {
 
     // Start axum REST API server
     let api_port = config.api_port;
-    let api_state = app_state;
+    let api_state = app_state.clone();
+    let api_state_for_thread = app_state;
     let _api_thread = std::thread::Builder::new()
         .name("api-server".into())
         .spawn(move || {
@@ -138,7 +139,7 @@ fn main() {
                 .build()
                 .expect("Failed to create tokio runtime for API server");
             rt.block_on(async {
-                let app = api::api_routes(api_state);
+                let app = api::api_routes(api_state_for_thread);
                 let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", api_port))
                     .await
                     .expect("Failed to bind API server");
@@ -152,6 +153,27 @@ fn main() {
         "quine-graph platform running: {} shard workers, timers every {}ms, API on port {}",
         config.shard_count, config.lru_check_interval_ms, api_port
     );
+
+    // If --ingest stdin was passed, auto-start a stdin ingest job.
+    if has_stdin_ingest_flag() {
+        let job = std::sync::Arc::new(ingest::IngestJob {
+            name: "stdin".into(),
+            source: ingest::IngestSource::Stdin,
+            status: std::sync::Mutex::new(ingest::IngestStatus::Running),
+            records_processed: std::sync::atomic::AtomicU64::new(0),
+            records_failed: std::sync::atomic::AtomicU64::new(0),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            started_at: std::time::Instant::now(),
+            completed_at: std::sync::Mutex::new(None),
+        });
+        api_state
+            .ingest_jobs
+            .lock()
+            .unwrap()
+            .insert("stdin".into(), job.clone());
+        ingest::start_file_ingest(job, api_state.channel_registry, api_state.shard_count);
+        eprintln!("stdin ingest: reading JSONL from stdin");
+    }
 
     // Keep main thread alive until all workers finish.
     // Workers block forever on recv until channels are closed.
@@ -212,4 +234,11 @@ fn parse_config() -> PlatformConfig {
     figment
         .extract()
         .expect("Failed to load configuration")
+}
+
+/// Check if `--ingest stdin` was passed on the command line.
+fn has_stdin_ingest_flag() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2)
+        .any(|w| w[0] == "--ingest" && w[1] == "stdin")
 }

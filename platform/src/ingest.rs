@@ -32,6 +32,7 @@ pub struct IngestJob {
 pub enum IngestSource {
     File { path: PathBuf },
     Inline { data: Vec<String> },
+    Stdin,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -234,6 +235,9 @@ fn run_ingest(
         }
         IngestSource::Inline { data } => {
             Box::new(data.clone().into_iter().map(Ok))
+        }
+        IngestSource::Stdin => {
+            Box::new(BufReader::new(std::io::stdin()).lines())
         }
     };
 
