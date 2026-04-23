@@ -33,6 +33,7 @@ pub enum IngestSource {
     File { path: PathBuf },
     Inline { data: Vec<String> },
     Stdin,
+    WatchDir { path: PathBuf },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -238,6 +239,13 @@ fn run_ingest(
         }
         IngestSource::Stdin => {
             Box::new(BufReader::new(std::io::stdin()).lines())
+        }
+        IngestSource::WatchDir { .. } => {
+            // Watch-dir jobs use run_watch_dir, not run_ingest
+            eprintln!("ingest {}: WatchDir source should use start_watch_dir_ingest", job.name);
+            *job.status.lock().unwrap() = IngestStatus::Errored("wrong entry point".into());
+            *job.completed_at.lock().unwrap() = Some(Instant::now());
+            return;
         }
     };
 

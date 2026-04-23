@@ -12,6 +12,7 @@ pub mod quine_id;
 mod roc_glue;
 mod shard_worker;
 mod timer;
+mod watch_dir;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
