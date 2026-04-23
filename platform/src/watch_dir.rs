@@ -550,4 +550,34 @@ mod tests {
             "processed/ should contain the moved file"
         );
     }
+
+    // ---- cancel flag test ----
+
+    #[test]
+    fn cancel_stops_ingest() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create several files
+        for i in 0..5 {
+            let file = dir.path().join(format!("file{}.jsonl", i));
+            std::fs::write(&file, valid_line(&format!("n{}", i))).unwrap();
+        }
+
+        let registry = make_registry();
+        let cancel = AtomicBool::new(false);
+        let processed = AtomicU64::new(0);
+        let failed = AtomicU64::new(0);
+
+        // Process first file normally
+        let files = scan_existing_files(dir.path());
+        assert_eq!(files.len(), 5);
+
+        let ok = ingest_single_file(&files[0], &registry, 4, &cancel, &processed, &failed).unwrap();
+        assert!(ok);
+
+        // Set cancel, process next file — should report cancelled
+        cancel.store(true, Ordering::Relaxed);
+        let ok2 = ingest_single_file(&files[1], &registry, 4, &cancel, &processed, &failed).unwrap();
+        assert!(!ok2); // cancelled
+    }
 }
