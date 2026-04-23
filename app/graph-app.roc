@@ -5,7 +5,8 @@ app [init_shard!, handle_message!, on_timer!]
       codec: "../packages/graph/codec/main.roc",
       routing: "../packages/graph/routing/main.roc",
       types: "../packages/graph/types/main.roc",
-      standing_result: "../packages/graph/standing/result/main.roc" }
+      standing_result: "../packages/graph/standing/result/main.roc",
+      cypher: "../packages/cypher/main.roc" }
 
 import pf.Effect
 import id.QuineId
@@ -14,6 +15,10 @@ import codec.Codec
 import routing.Routing
 import types.Config exposing [default_config]
 import types.Effects exposing [Effect]
+import cypher.Lexer
+import cypher.Parser
+import cypher.Planner
+import cypher.PlanCodec
 
 
 ## Type alias required by the platform's `requires { ShardState }` contract.
@@ -92,6 +97,33 @@ handle_shard_cmd! = |state, msg|
             Effect.log!(2, "graph-app: cancelling SQ $(Num.to_str(global_id))")
             updated = ShardState.cancel_standing_query(state, global_id)
             drain_effects!(updated)
+
+        Ok({ val: PlanQuery({ reply_to, query_text, hint_qids }) }) ->
+            Effect.log!(2, "graph-app: PlanQuery received")
+            lex_result = Lexer.lex(query_text)
+            when lex_result is
+                Err(err) ->
+                    Effect.reply!(reply_to, encode_plan_error(err.message))
+                    state
+
+                Ok(tokens) ->
+                    parse_result = Parser.parse(tokens)
+                    when parse_result is
+                        Err(err) ->
+                            Effect.reply!(reply_to, encode_plan_error(err.message))
+                            state
+
+                        Ok(ast) ->
+                            plan_result = Planner.plan(ast, hint_qids)
+                            when plan_result is
+                                Err(PlanError(plan_msg)) ->
+                                    Effect.reply!(reply_to, encode_plan_error(plan_msg))
+                                    state
+
+                                Ok(plan) ->
+                                    encoded = PlanCodec.encode_plan(plan)
+                                    Effect.reply!(reply_to, encoded)
+                                    state
 
         Err(err) ->
             err_str = decode_err_to_str(err)
@@ -270,6 +302,14 @@ encode_reply_payload = |payload|
 
         Err(_) ->
             List.concat(encode_u32_le(0u32), encode_u32_le(0u32))
+
+## Encode a plan error reply: [0xFF][error_len:U16LE][error_utf8]
+encode_plan_error : Str -> List U8
+encode_plan_error = |msg|
+    msg_bytes = Str.to_utf8(msg)
+    [0xFF]
+    |> List.concat(encode_u16_le(Num.to_u16(List.len(msg_bytes))))
+    |> List.concat(msg_bytes)
 
 encode_u16_le : U16 -> List U8
 encode_u16_le = |n|

@@ -586,6 +586,24 @@ decode_sq_command = |buf, offset|
 
                 _ -> Err(InvalidTag)
 
+# ===== QuineId List Decoding =====
+
+## Decode a list of QuineIds (each 16 bytes) from the buffer.
+decode_qid_list : List U8, U64, U64 -> Result { val : List QuineId, next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
+decode_qid_list = |buf, offset, count|
+    decode_qid_list_helper(buf, offset, count, [])
+
+decode_qid_list_helper : List U8, U64, U64, List QuineId -> Result { val : List QuineId, next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
+decode_qid_list_helper = |buf, offset, remaining, acc|
+    if remaining == 0 then
+        Ok({ val: acc, next: offset })
+    else if offset + 16 > List.len(buf) then
+        Err(OutOfBounds)
+    else
+        qid_bytes = List.sublist(buf, { start: offset, len: 16 })
+        qid = QuineId.from_bytes(qid_bytes)
+        decode_qid_list_helper(buf, offset + 16, remaining - 1, List.append(acc, qid))
+
 # ===== Shard Command Decoding =====
 
 ## Shard-level command tags (sent by the REST API to shard channels).
@@ -597,7 +615,7 @@ decode_sq_command = |buf, offset|
 
 ## Decode a shard-level command from the buffer at the given offset.
 ## Returns RegisterSq, UpdateSqs, or CancelSq.
-decode_shard_cmd : List U8, U64 -> Result { val : [RegisterSq { global_id : StandingQueryId, include_cancellations : Bool, query : MvStandingQuery }, UpdateSqs, CancelSq { global_id : StandingQueryId }], next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
+decode_shard_cmd : List U8, U64 -> Result { val : [RegisterSq { global_id : StandingQueryId, include_cancellations : Bool, query : MvStandingQuery }, UpdateSqs, CancelSq { global_id : StandingQueryId }, PlanQuery { reply_to : U64, query_text : Str, hint_qids : List QuineId }], next : U64 } [OutOfBounds, BadUtf8, InvalidTag, InvalidDirection]
 decode_shard_cmd = |buf, offset|
     when List.get(buf, offset) is
         Err(_) -> Err(OutOfBounds)
@@ -625,6 +643,21 @@ decode_shard_cmd = |buf, offset|
                         Err(e) -> Err(e)
                         Ok({ val: global_id, next }) ->
                             Ok({ val: CancelSq({ global_id }), next })
+
+                0x04 ->
+                    when decode_u64(buf, data_start) is
+                        Err(e) -> Err(e)
+                        Ok({ val: reply_to, next: query_start }) ->
+                            when decode_str(buf, query_start) is
+                                Err(e) -> Err(e)
+                                Ok({ val: query_text, next: hints_start }) ->
+                                    when decode_u16(buf, hints_start) is
+                                        Err(e) -> Err(e)
+                                        Ok({ val: hint_count, next: hints_data_start }) ->
+                                            when decode_qid_list(buf, hints_data_start, Num.int_cast(hint_count)) is
+                                                Err(e) -> Err(e)
+                                                Ok({ val: hint_qids, next }) ->
+                                                    Ok({ val: PlanQuery({ reply_to, query_text, hint_qids }), next })
 
                 _ -> Err(InvalidTag)
 
@@ -1548,4 +1581,54 @@ expect
             and List.len(snapshot.edges) == 1
             and snapshot.time == EventTime.from_parts({ millis: 5000, message_seq: 2, event_seq: 1 })
             and List.len(snapshot.sq_snapshot) == 1
+        _ -> Bool.false
+
+# ===== PlanQuery Decode Tests =====
+
+# -- PlanQuery decode with zero hints --
+expect
+    # Encode: [0x04][reply_to=42:U64LE][query="MATCH (n) RETURN n":str][hint_count=0:U16LE]
+    encoded =
+        [0x04]
+        |> List.concat(encode_u64(42u64))
+        |> List.concat(encode_str("MATCH (n) RETURN n"))
+        |> List.concat(encode_u16(0u16))
+    when decode_shard_cmd(encoded, 0) is
+        Ok({ val: PlanQuery({ reply_to: 42, query_text, hint_qids }) }) ->
+            query_text == "MATCH (n) RETURN n" && List.len(hint_qids) == 0
+        _ -> Bool.false
+
+# -- PlanQuery decode with hint qids --
+expect
+    qid1_bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10]
+    encoded =
+        [0x04]
+        |> List.concat(encode_u64(99u64))
+        |> List.concat(encode_str("MATCH (n) RETURN n"))
+        |> List.concat(encode_u16(1u16))
+        |> List.concat(qid1_bytes)
+    when decode_shard_cmd(encoded, 0) is
+        Ok({ val: PlanQuery({ reply_to: 99, query_text, hint_qids }) }) ->
+            query_text == "MATCH (n) RETURN n"
+            && List.len(hint_qids) == 1
+            && QuineId.to_bytes(List.first(hint_qids) |> Result.with_default(QuineId.empty)) == qid1_bytes
+        _ -> Bool.false
+
+# -- PlanQuery decode truncated --
+expect
+    # Only tag + partial reply_to
+    when decode_shard_cmd([0x04, 0x01, 0x02], 0) is
+        Err(OutOfBounds) -> Bool.true
+        _ -> Bool.false
+
+# -- decode_qid_list empty --
+expect
+    when decode_qid_list([], 0, 0) is
+        Ok({ val, next: 0 }) -> List.len(val) == 0
+        _ -> Bool.false
+
+# -- decode_qid_list truncated --
+expect
+    when decode_qid_list([0x01, 0x02], 0, 1) is
+        Err(OutOfBounds) -> Bool.true
         _ -> Bool.false
