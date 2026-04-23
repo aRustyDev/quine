@@ -5,6 +5,7 @@
 pub mod health;
 pub mod ingest;
 pub mod nodes;
+pub mod query;
 pub mod standing_queries;
 #[cfg(test)]
 mod tests;
@@ -80,5 +81,6 @@ fn v1_routes() -> Router<Arc<AppState>> {
         .merge(ingest::routes())
         .merge(standing_queries::routes())
         .merge(nodes::routes())
+        .merge(query::routes())
         .merge(health::routes())
 }

@@ -395,6 +395,76 @@ mod tests {
         assert_eq!(json["properties"]["name"], "Alice");
     }
 
+    // ---- Query Endpoint Tests ----
+
+    #[tokio::test]
+    async fn query_missing_body_returns_422() {
+        let state = test_state();
+        let app = app(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/query")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Missing "query" field → 422 Unprocessable Entity (axum deserialization)
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn query_timeout_returns_504() {
+        let state = test_state();
+        let app = app(state);
+
+        // Send a valid query — but no shard worker is processing, so plan_query will timeout
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/query")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"query":"MATCH (n) RETURN n","node_ids":["alice"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should timeout (504) since no shard worker is processing the PlanQuery
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn query_with_empty_node_ids() {
+        let state = test_state();
+        let app = app(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/query")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"query":"MATCH (n) RETURN n"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Also times out — no shard worker, but validates that empty node_ids is accepted
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    // ---- Node Reply Decoding (continued) ----
+
     #[test]
     fn decode_node_reply_with_integer_prop() {
         let mut bytes = Vec::new();
