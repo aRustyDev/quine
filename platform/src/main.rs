@@ -182,6 +182,32 @@ fn main() {
         eprintln!("stdin ingest: reading JSONL from stdin");
     }
 
+    // If --ingest watch-dir <path> was passed, auto-start a watch-dir ingest job.
+    if let Some(watch_path) = watch_dir_ingest_path() {
+        let path = std::path::PathBuf::from(&watch_path);
+        if !path.is_dir() {
+            eprintln!("watch-dir ingest: '{}' is not a directory", watch_path);
+            std::process::exit(1);
+        }
+        let job = Arc::new(ingest::IngestJob {
+            name: "watch-dir".into(),
+            source: ingest::IngestSource::WatchDir { path },
+            status: std::sync::Mutex::new(ingest::IngestStatus::Running),
+            records_processed: std::sync::atomic::AtomicU64::new(0),
+            records_failed: std::sync::atomic::AtomicU64::new(0),
+            cancel: Arc::new(AtomicBool::new(false)),
+            started_at: std::time::Instant::now(),
+            completed_at: std::sync::Mutex::new(None),
+        });
+        api_state
+            .ingest_jobs
+            .lock()
+            .unwrap()
+            .insert("watch-dir".into(), job.clone());
+        watch_dir::start_watch_dir_ingest(job, api_state.channel_registry, api_state.shard_count);
+        eprintln!("watch-dir ingest: watching {}", watch_path);
+    }
+
     // Spawn a dedicated thread to catch SIGINT/SIGTERM and initiate shutdown.
     let shutdown_registry = roc_glue::channel_registry();
     let shutdown_shard_count = config.shard_count;
@@ -335,4 +361,12 @@ fn has_stdin_ingest_flag() -> bool {
     let args: Vec<String> = std::env::args().collect();
     args.windows(2)
         .any(|w| w[0] == "--ingest" && w[1] == "stdin")
+}
+
+/// Return the path argument from `--ingest watch-dir <path>`, if present.
+fn watch_dir_ingest_path() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(3)
+        .find(|w| w[0] == "--ingest" && w[1] == "watch-dir")
+        .map(|w| w[2].clone())
 }
